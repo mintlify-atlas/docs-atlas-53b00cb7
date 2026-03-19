@@ -45,8 +45,8 @@ The current stable version is **v1**. The version prefix is part of every URL (`
   <Card title="Orders" icon="shopping-cart" href="/api/orders">
     Create and manage tenant orders with status transitions.
   </Card>
-  <Card title="Coupons" icon="ticket" href="/api/coupons">
-    Verify coupon codes and list available discounts.
+  <Card title="Coupons & Checkout" icon="ticket" href="/api/coupons">
+    Verify coupon codes, list discounts, and manage cart/inventory during checkout.
   </Card>
   <Card title="Analytics" icon="chart-bar" href="/api/analytics">
     Track page views, interactions, and conversion events.
@@ -61,6 +61,21 @@ The current stable version is **v1**. The version prefix is part of every URL (`
     Generate and download sales, inventory, and kitchen reports.
   </Card>
 </CardGroup>
+
+## Additional endpoints
+
+The following endpoints are also available in `api/v1` but are documented inline rather than having dedicated pages:
+
+### Tenant settings
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/settings` | `auth:sanctum`, `tenant.ownership` | Retrieve tenant branding and configuration |
+| `POST` | `/api/v1/settings/update` | `auth:sanctum`, `tenant.ownership` | Update tenant branding (name, logo, whatsapp, schedule) |
+
+**Route name:** `api.tenant.settings.update`
+
+The `GET /api/v1/settings` response is shaped by `TenantSettingsResource` and includes the tenant's name, slug, logo URL, WhatsApp number, opening hours, and plan status. The `POST` endpoint accepts multipart form data when uploading a logo file.
 
 ## Error format
 

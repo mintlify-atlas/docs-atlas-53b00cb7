@@ -1,6 +1,6 @@
 ---
-title: "Coupons"
-description: "Verify coupon codes, list available discounts, and manage cart coupon state."
+title: "Coupons & Checkout"
+description: "Verify coupon codes, list available discounts, manage cart coupon state, and hold inventory during checkout."
 ---
 
 ## POST /api/v1/coupons/verify
@@ -164,11 +164,64 @@ Confirmation that the coupon was removed from the session.
 
 ## POST /api/v1/checkout/cart-summary
 
-Calculate and return a cart summary including subtotal, discounts, and total.
+Sync a checkout session cart to the server and return a summary including subtotal. Used to keep server-side cart state consistent with the client before placing an order.
 
 **Middleware:** `throttle:api`  
-**Authentication:** Not required
+**Authentication:** Optional (pass `Authorization` header if logged in)
+
+### Request body
+
+<ParamField body="session_id" type="string" required>
+  Client-generated session identifier for the cart.
+</ParamField>
+
+<ParamField body="items" type="object[]" required>
+  Array of cart line items.
+</ParamField>
+
+<ParamField body="subtotal" type="number" required>
+  Calculated cart subtotal from the client.
+</ParamField>
 
 ### Response `200 OK`
 
-Cart totals object with applied coupon discount if any.
+<ResponseField name="success" type="boolean">`true`</ResponseField>
+<ResponseField name="message" type="string">`Cart synchronized successfully`</ResponseField>
+<ResponseField name="subtotal" type="number">Echoed subtotal value.</ResponseField>
+
+---
+
+## POST /api/v1/checkout/hold-inventory
+
+Reserve stock for cart items during the checkout process. Prevents overselling by locking inventory quantities for a short window while the customer completes payment.
+
+**Route name:** `checkout.hold-inventory`  
+**Middleware:** `throttle:api`  
+**Authentication:** Not required
+
+### Request body
+
+<ParamField body="items" type="object[]" required>
+  Cart line items to hold. Each item must include `product_id` and `quantity`.
+</ParamField>
+
+<ParamField body="location_id" type="string">
+  UUID of the location to hold inventory from. When omitted, the tenant's active primary location is used automatically.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="success" type="boolean">`true`</ResponseField>
+<ResponseField name="message" type="string">Confirmation that inventory holds were applied.</ResponseField>
+
+### Response `400 Bad Request`
+
+Returned when no active primary location can be found for the tenant.
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `400` | Missing or unresolvable tenant ID |
+| `400` | No active primary location found |
+| `422` | Validation failure on `items` structure |
