@@ -1,0 +1,68 @@
+---
+title: "Rate limiting"
+description: "Named throttle groups, their limits, and how to handle 429 responses."
+---
+
+## Overview
+
+The API enforces rate limits using Laravel's named throttle middleware groups. Different endpoint categories use different throttle configurations to balance protection and usability.
+
+## Throttle groups
+
+| Group | Applied to | Behavior |
+|-------|-----------|----------|
+| `throttle:api` | General API endpoints (default) | Standard per-IP/user limit |
+| `throttle:api.otp-generation` | `POST /api/v1/otp/generate` | Strict — prevents OTP flooding |
+| `throttle:api.verification` | `POST /api/v1/otp/verify`, coupon verify, validate coupon | Strict — prevents brute-force |
+| `throttle:api.transactions` | `POST /api/v1/orders` (public checkout) | Per-IP transaction rate limit |
+| `throttle:tenant-aware` | `POST /api/v1/interactions` | Tenant-scoped analytics protection |
+
+### `throttle:api` — general
+
+Applied by default to most public and authenticated endpoints. Uses Laravel's standard rate limiter configured in `App\Providers\RouteServiceProvider`.
+
+### `throttle:api.otp-generation` — OTP generation
+
+Applied only to `POST /api/v1/otp/generate`. This route also uses the `idempotency` middleware to prevent duplicate OTP requests within the same time window.
+
+### `throttle:api.verification` — OTP verification
+
+Applied to `POST /api/v1/otp/verify`, `POST /api/v1/coupons/verify`, and `POST /api/v1/checkout/validate-coupon`. Protects against code enumeration attacks.
+
+### `throttle:tenant-aware` — tenant-aware analytics
+
+Applied to `POST /api/v1/interactions`. Replaced the former `analytics-protection` group. Throttling is scoped per tenant to prevent a single tenant's traffic from affecting others.
+
+## AI budget throttling
+
+The `POST /api/v1/ai/generate` endpoint uses an additional **token bucket** rate limiter on top of the route-level throttle. Each authenticated user is allowed **5 AI generation requests per hour**. This is enforced at the controller level with a dedicated limiter key (`ai-gen:{user_id}`).
+
+## Handling 429 responses
+
+When you exceed a rate limit the API returns `429 Too Many Requests`.
+
+```json
+{
+  "message": "Too Many Attempts."
+}
+```
+
+For the AI endpoint the response includes a retry hint:
+
+```json
+{
+  "message": "Límite de generación excedido. Intenta de nuevo en 45:00 minutos."
+}
+```
+
+Check the standard Laravel throttle response headers to determine when to retry:
+
+| Header | Description |
+|--------|-------------|
+| `X-RateLimit-Limit` | Maximum requests allowed in the window |
+| `X-RateLimit-Remaining` | Requests remaining in the current window |
+| `Retry-After` | Seconds until the limit resets |
+
+<Warning>
+Repeated rate-limit violations from the same IP may trigger additional protections at the infrastructure level.
+</Warning>

@@ -1,0 +1,258 @@
+---
+title: "Modular monolith"
+description: "Why Vito Business OS chose a modular monolith over microservices, how each layer is structured, and the four rules that keep it clean."
+---
+
+## Why a modular monolith?
+
+For an SMB SaaS platform targeting developing regions, microservices introduce operational overhead — distributed tracing, network partitions, independent deployment pipelines, and polyglot data stores — that far outweigh the benefits at this scale.
+
+A modular monolith gives you:
+
+- **Low operational cost** — single deployment unit, single database, one process to monitor
+- **Strong module boundaries** — enforced by automated architecture tests, not by network topology
+- **Refactorability** — modules can be extracted to services later if load demands it; clean boundaries make that migration mechanical rather than heroic
+- **Type safety end-to-end** — a single PHP → TypeScript contract sync covers the entire surface area
+
+<Tip>
+The hardest part of microservices is not running them — it's keeping the contracts between them honest. In a modular monolith, the compiler and test suite do that work for you.
+</Tip>
+
+## Directory structure
+
+```
+app/
+├── Domain/          # Layer 1 — Pure business logic
+│   ├── Identity/
+│   ├── Sales/
+│   ├── Billing/
+│   ├── Booking/
+│   ├── Marketing/
+│   └── ...          # One directory per bounded context
+├── Application/     # Layer 2 — Use-case orchestration
+│   ├── Identity/
+│   │   ├── Commands/
+│   │   ├── Handlers/
+│   │   └── Results/
+│   └── ...
+├── Infrastructure/  # Layer 3 — Adapters and persistence
+│   ├── Persistence/
+│   ├── Repositories/
+│   ├── Bus/
+│   └── ...
+├── Http/            # Layer 4 — HTTP delivery
+│   ├── Controllers/
+│   ├── Requests/
+│   └── Resources/
+└── Filament/        # Admin panels (Filament 4.2)
+
+resources/
+└── js/              # React 18 + TypeScript frontend
+```
+
+## The four strict layer rules
+
+### Rule 1 — Domain knows nothing outside itself
+
+Entities, enums, and repository interfaces are pure PHP. No Laravel facades, no Eloquent, no HTTP.
+
+```php
+// app/Domain/Identity/Entities/UserEntity.php
+
+final class UserEntity
+{
+    private string $id;
+    private string $name;
+    private string $email;
+    private UserRole $role;
+    private ?string $tenantId = null;
+
+    private function __construct() {}
+
+    public static function register(
+        string $uuid,
+        string $name,
+        string $email,
+        string $passwordHash,
+        UserRole $role,
+        ?string $tenantId = null
+    ): self {
+        $user = new self;
+        $user->password = $passwordHash;
+        // Records a domain event — no DB, no HTTP
+        $event = UserRegistered::now(
+            user_id: $uuid,
+            name: $name,
+            email: $email,
+            role: $role->value,
+            tenant_id: $tenantId,
+        );
+        $user->recordThat($event);
+        return $user;
+    }
+}
+```
+
+```php
+// app/Domain/Identity/Repositories/UserRepositoryInterface.php
+
+interface UserRepositoryInterface
+{
+    public function save(UserEntity $user): void;
+    public function findById(string $id, string $tenantId): ?UserEntity;
+    public function findByEmail(string $email, string $tenantId): ?UserEntity;
+    public function existsByEmail(string $email): bool;
+}
+```
+
+### Rule 2 — Commands and Results are `final readonly`
+
+Every input to the Application layer is an immutable DTO. Every output is an immutable DTO. No arrays, no Eloquent models.
+
+```php
+// app/Application/Identity/Commands/RegisterUserCommand.php
+
+final readonly class RegisterUserCommand implements
+    VersionedCommandInterface,
+    IdempotentCommandInterface,
+    SensitiveDataInterface
+{
+    public function __construct(
+        public string $name,
+        #[\SensitiveParameter] public string $email,
+        #[\SensitiveParameter] public string $password,
+        public ?string $tenantName = null,
+        public ?string $slug = null,
+        public ?string $tenantId = null,
+        public ?string $role = null,
+        public string $source = 'user_registration',
+        public ?string $idempotencyKey = null,
+        public int $schemaVersion = 1,
+    ) {}
+}
+```
+
+```php
+// app/Application/Identity/Results/RegisterUserResult.php
+
+final readonly class RegisterUserResult
+{
+    public function __construct(
+        public string $id,
+        public string $tenantId,
+        #[\SensitiveParameter] public string $email,
+        public DateTimeImmutable $registeredAt,
+        public bool $requiresVerification = true,
+    ) {}
+}
+```
+
+### Rule 3 — Infrastructure implements, never decides
+
+Eloquent models and repositories live exclusively in `app/Infrastructure`. Repositories receive and return Domain Entities — never raw Eloquent models.
+
+```php
+// app/Infrastructure/Repositories/Sales/EloquentOrderRepository.php
+
+final class EloquentOrderRepository implements OrderRepositoryInterface
+{
+    public function save(OrderEntity $order): OrderEntity
+    {
+        // Eloquent is used here and only here
+        $model = $order->id !== null
+            ? Order::query()->find($order->id) ?? throw OrderNotFoundException::withId($order->id)
+            : new Order;
+
+        // ... persist attributes ...
+
+        $model->save();
+
+        // Map back to a Domain Entity before returning
+        return $this->toEntity($model->fresh(['items', 'tenant']));
+    }
+}
+```
+
+<Warning>
+Never return an Eloquent model from a repository. The Application layer must never see `App\Models\*`. Map everything to Domain Entities before crossing the boundary.
+</Warning>
+
+### Rule 4 — Controllers are thin traffic cops
+
+A controller's only job is to translate an HTTP request into a Command, delegate to a Handler, and translate the Result into an HTTP response. No business logic, no validation logic, no SQL.
+
+```php
+// app/Http/Controllers/Auth/RegisteredUserController.php
+
+final class RegisteredUserController extends Controller
+{
+    public function __construct(
+        private StatefulGuard $auth,
+        private LoggerInterface $logger,
+        private CommandBusInterface $bus
+    ) {}
+
+    public function store(RegisterTenantRequest $request): RedirectResponse
+    {
+        $command = new RegisterTenantCommand(
+            businessName: $request->validated('business_name'),
+            email: $request->validated('email'),
+            password: $request->validated('password'),
+            // ...
+        );
+
+        /** @var RegisterTenantResult $result */
+        $result = $this->bus->dispatch($command);
+
+        $user = \App\Models\User::where('email', $result->ownerEmail)->firstOrFail();
+        $this->auth->login($user);
+
+        return redirect()->route('filament.admin.pages.dashboard');
+    }
+}
+```
+
+## The outbox pattern
+
+Events are not dispatched inline inside transactions. Dispatching an event inside a DB transaction creates a race condition — the transaction could fail after the event fires, leaving listeners acting on data that was never committed.
+
+Instead, Vito uses a **transactional outbox**: the event is written to an `outbox` table inside the same transaction as the business data. A background worker (`outbox:process`, scheduled every minute) reads pending events and dispatches them after the transaction is confirmed committed.
+
+```php
+// app/Infrastructure/Bus/TransactionalEventDispatcher.php
+
+final readonly class TransactionalEventDispatcher implements EventDispatcherInterface
+{
+    public function __construct(
+        private Dispatcher $dispatcher,
+        private OutboxRepositoryInterface $outboxRepository
+    ) {}
+
+    public function dispatch(object $event): void
+    {
+        // Write to outbox table — atomic with the parent transaction
+        // The background worker reads this and dispatches after commit
+        $this->outboxRepository->append($event);
+    }
+}
+```
+
+This eliminates the "phantom write" race condition where the application process dies between a successful commit and an in-memory event dispatch.
+
+## TypeScript contract sync
+
+PHP DTOs and Enums annotated with `#[TypeScript]` are compiled to TypeScript types. The generated file lives at `resources/js/types/generated.d.ts`.
+
+```bash
+# Run after any DTO or Enum change
+php artisan typescript:transform
+
+# Or via the npm alias
+npm run types:sync
+```
+
+CI runs the transformer and then checks `git diff --exit-code`. If `generated.d.ts` has uncommitted changes, the build fails. You must run the sync locally before pushing.
+
+<Note>
+This creates an explicit, machine-verified contract between the PHP backend and the TypeScript frontend. Type drift — where the backend changes a field and the frontend silently breaks — is impossible.
+</Note>

@@ -1,0 +1,131 @@
+---
+title: "Scheduler"
+description: "All scheduled tasks, their schedules, and how to configure the Laravel cron entry for Vito Business OS."
+---
+
+Vito Business OS uses the [Laravel Task Scheduler](https://laravel.com/docs/scheduling) to run background maintenance tasks. Tasks are defined in `routes/console.php`.
+
+## Cron Entry Setup
+
+Add a single cron entry that calls `schedule:run` every minute. Laravel then determines which tasks are due.
+
+```bash
+crontab -e -u www-data
+```
+
+```bash
+* * * * * cd /var/www/conecta-hn && php artisan schedule:run >> /dev/null 2>&1
+```
+
+<Note>
+If you are using **Supervisor** to manage processes (see the [Deployment](/operations/deployment) guide), you can run `schedule:work` as a long-running daemon instead of the cron entry above. Use one or the other — not both.
+
+```bash
+# Supervisor alternative (via conecta-scheduler program)
+php artisan schedule:work
+```
+</Note>
+
+## Scheduled Tasks
+
+| Command / Job | Schedule | Overlap Guard | Description |
+|---|---|---|---|
+| `subscriptions:check-expiry` | Daily at 08:00 | `withoutOverlapping` | Checks for subscriptions expiring in 3 days and dispatches `SubscriptionExpiringNotification` to tenant owners. Uses `chunkById(100)` for memory safety. |
+| `ReleaseStaleOrders` (job) | Every 15 minutes | `withoutOverlapping` | Cancels PENDING orders older than 30 minutes and restores `stock_quantity`. Prevents inventory hoarding from abandoned checkouts. |
+| `storage:cleanup-orphans --grace=60` | Hourly | `withoutOverlapping` | Deletes uploaded files that were never linked to a database record, with a 60-minute grace period to avoid removing files still being processed. |
+| `outbox:process` | Every minute | `withoutOverlapping` | Dispatches pending domain events from the transactional outbox table. Guarantees at-least-once delivery even after an application crash. |
+| `sales:detect-abandoned-carts` | Every 15 minutes | `withoutOverlapping` | Detects shopping carts abandoned for more than 30 minutes and dispatches `CartAbandoned` domain events for downstream recovery flows. |
+| `auth:prune-idempotency --days=30 --chunk=1000` | Daily at 03:30 | `withoutOverlapping` | Removes COMPLETED idempotency records older than 30 days using chunked deletes (nibbling strategy) to prevent index locking. |
+| `model:prune` | Daily at 04:00 | — | Runs Laravel's built-in model pruning. Cleans idempotency keys older than 48 hours and processed outbox messages per their `Prunable` definitions. |
+| `SendAppointmentReminders` (job) | Hourly | `withoutOverlapping` | Dispatches reminder emails to customers with appointments in the next 23–24 hours. Uses `reminder_sent_at` column for idempotency to prevent duplicate sends. |
+| `billing:reconcile-pending` | Hourly | — | Iterates all tenants and dispatches `ReconcilePendingSubscriptionsCommand` for each, querying the payment gateway to resolve PENDING subscription intents older than 1 hour. |
+
+## Task Details
+
+### Subscription Expiry Check
+
+Runs daily at **08:00** and looks for tenants whose subscriptions expire in 3 days. Dispatches a notification to prompt renewal.
+
+```php
+Schedule::command('subscriptions:check-expiry')
+    ->dailyAt('08:00')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/subscription-checker.log'));
+```
+
+### Stale Order Release
+
+Runs every **15 minutes**. Cancels PENDING orders older than 30 minutes and releases locked inventory back to `stock_quantity`.
+
+```php
+Schedule::job(new \App\Infrastructure\Jobs\Governance\ReleaseStaleOrders)
+    ->everyFifteenMinutes()
+    ->withoutOverlapping();
+```
+
+### Orphaned Upload Cleanup
+
+Runs **hourly** and removes files uploaded to storage but never associated with a database record. The `--grace=60` flag skips files younger than 60 minutes to protect uploads still in progress.
+
+```php
+Schedule::command('storage:cleanup-orphans --grace=60')
+    ->hourly()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/orphan-cleanup.log'));
+```
+
+### Outbox Processor
+
+Runs **every minute** and is the heartbeat of the transactional outbox pattern. Picks up any domain events persisted to the `outbox_messages` table and dispatches them, providing at-least-once delivery guarantees.
+
+```php
+Schedule::command('outbox:process')
+    ->everyMinute()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/outbox-worker.log'));
+```
+
+### Idempotency Pruning
+
+Runs daily at **03:30** (before `model:prune` at 04:00). Deletes COMPLETED idempotency records older than 30 days in chunks of 1,000 rows to avoid table locks.
+
+```php
+Schedule::command('auth:prune-idempotency', ['--days=30', '--chunk=1000'])
+    ->dailyAt('03:30')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/idempotency-pruner.log'));
+```
+
+## Log Files
+
+Scheduled tasks write output to dedicated log files under `storage/logs/`:
+
+| Log File | Task |
+|---|---|
+| `storage/logs/subscription-checker.log` | `subscriptions:check-expiry` |
+| `storage/logs/orphan-cleanup.log` | `storage:cleanup-orphans` |
+| `storage/logs/outbox-worker.log` | `outbox:process` |
+| `storage/logs/idempotency-pruner.log` | `auth:prune-idempotency` |
+| `storage/logs/scheduler.log` | Scheduler daemon (Supervisor) |
+
+## Manual Execution
+
+Any scheduled task can be triggered manually during debugging:
+
+```bash
+# Run the outbox processor immediately
+php artisan outbox:process
+
+# Run subscription expiry check
+php artisan subscriptions:check-expiry
+
+# Run stale order cleanup
+php artisan schedule:run --task="ReleaseStaleOrders"
+
+# Prune idempotency keys
+php artisan auth:prune-idempotency --days=30 --chunk=1000
+```

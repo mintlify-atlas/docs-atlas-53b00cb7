@@ -1,0 +1,238 @@
+---
+title: "Notifications"
+description: "List, count, and mark notifications as read. Manage browser push subscriptions."
+---
+
+All notification endpoints require authentication via `auth:sanctum`.
+
+## GET /api/v1/notifications
+
+Fetch paginated notifications for the authenticated user. Unread notifications appear first, then newest first.
+
+**Middleware:** `auth:sanctum`, `throttle:api`  
+**Authentication:** Required
+
+### Response `200 OK`
+
+Paginated collection (10 per page) of `NotificationResource` objects.
+
+<ResponseField name="data" type="object[]">
+  <Expandable title="properties">
+    <ResponseField name="id" type="string">UUID of the notification.</ResponseField>
+    <ResponseField name="type" type="string">Notification type (e.g. `export_ready`, `general`).</ResponseField>
+    <ResponseField name="title" type="string">Notification title.</ResponseField>
+    <ResponseField name="body" type="string">Notification body text.</ResponseField>
+    <ResponseField name="action_url" type="string">
+      Optional URL for the notification action. For `export_ready` notifications, this is a **30-minute temporary signed URL** generated on the fly for the file download.
+    </ResponseField>
+    <ResponseField name="read_at" type="string">ISO 8601 timestamp when the notification was read, or `null`.</ResponseField>
+    <ResponseField name="created_at" type="string">ISO 8601 creation timestamp.</ResponseField>
+    <ResponseField name="time_ago" type="string">Human-readable relative time (e.g. `5 minutes ago`).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl https://yourdomain.com/api/v1/notifications \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch('https://yourdomain.com/api/v1/notifications', {
+  headers: {
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+});
+const { data } = await res.json();
+```
+
+</CodeGroup>
+
+---
+
+## GET /api/v1/notifications/count
+
+Return the count of unread notifications for the authenticated user.
+
+**Middleware:** `auth:sanctum`, `throttle:api`  
+**Authentication:** Required
+
+### Response `200 OK`
+
+<ResponseField name="count" type="integer">
+  Number of notifications where `read_at` is `null`.
+</ResponseField>
+
+```json
+{ "count": 3 }
+```
+
+---
+
+## PATCH /api/v1/notifications/read-all
+
+Mark all unread notifications as read for the authenticated user.
+
+**Middleware:** `auth:sanctum`, `throttle:api`  
+**Authentication:** Required
+
+### Response `200 OK`
+
+<ResponseField name="status" type="string">`success`</ResponseField>
+
+---
+
+## PATCH /api/v1/notifications/{id}/read
+
+Mark a single notification as read.
+
+**Middleware:** `auth:sanctum`, `throttle:api`  
+**Authentication:** Required
+
+### Path parameters
+
+<ParamField path="id" type="string" required>
+  UUID of the notification to mark as read.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="status" type="string">`success`</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X PATCH https://yourdomain.com/api/v1/notifications/550e8400-e29b-41d4-a716-446655440000/read \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch(
+  `https://yourdomain.com/api/v1/notifications/${notificationId}/read`,
+  {
+    method: 'PATCH',
+    headers: {
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+  }
+);
+```
+
+</CodeGroup>
+
+---
+
+## POST /api/v1/push-subscriptions
+
+Register or update a Web Push (VAPID) subscription for the authenticated user.
+
+**Middleware:** `auth:sanctum`, `throttle:api`  
+**Authentication:** Required
+
+### Request body
+
+<ParamField body="endpoint" type="string" required>
+  The push endpoint URL provided by the browser's Push API. Maximum 1000 characters.
+</ParamField>
+
+<ParamField body="keys.auth" type="string" required>
+  VAPID auth key from the browser push subscription. Maximum 255 characters.
+</ParamField>
+
+<ParamField body="keys.p256dh" type="string" required>
+  VAPID p256dh key from the browser push subscription. Maximum 255 characters.
+</ParamField>
+
+<ParamField body="contentEncoding" type="string">
+  Optional content encoding (e.g. `aesgcm`, `aes128gcm`). Maximum 50 characters.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="status" type="string">`success`</ResponseField>
+<ResponseField name="message" type="string">`Web Push subscription updated.`</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://yourdomain.com/api/v1/push-subscriptions \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "endpoint": "https://fcm.googleapis.com/fcm/send/...",
+    "keys": {
+      "auth": "auth_key_here",
+      "p256dh": "p256dh_key_here"
+    }
+  }'
+```
+
+```typescript TypeScript (fetch)
+const subscription = await registration.pushManager.subscribe({ ... });
+const sub = subscription.toJSON();
+
+await fetch('https://yourdomain.com/api/v1/push-subscriptions', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+  body: JSON.stringify({
+    endpoint: sub.endpoint,
+    keys: sub.keys,
+  }),
+});
+```
+
+</CodeGroup>
+
+---
+
+## DELETE /api/v1/push-subscriptions
+
+Unregister a Web Push subscription.
+
+**Middleware:** `auth:sanctum`, `throttle:api`  
+**Authentication:** Required
+
+### Request body
+
+<ParamField body="endpoint" type="string" required>
+  The push endpoint URL to remove. Maximum 1000 characters.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="status" type="string">`success`</ResponseField>
+<ResponseField name="message" type="string">`Web Push subscription deleted.`</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X DELETE https://yourdomain.com/api/v1/push-subscriptions \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"endpoint": "https://fcm.googleapis.com/fcm/send/..."}'
+```
+
+```typescript TypeScript (fetch)
+await fetch('https://yourdomain.com/api/v1/push-subscriptions', {
+  method: 'DELETE',
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+  body: JSON.stringify({ endpoint: subscription.endpoint }),
+});
+```
+
+</CodeGroup>

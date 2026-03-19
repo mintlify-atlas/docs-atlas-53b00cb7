@@ -1,6 +1,6 @@
 ---
 title: "Vito Business OS"
-description: "An open-source multi-tenant SaaS platform built with Laravel, React, and Filament to empower small businesses in developing regions."
+description: "An open-source multi-tenant SaaS platform built with Laravel, React, and Filament to empower small and medium businesses in developing regions."
 ---
 
 <CardGroup cols={2}>
@@ -70,3 +70,26 @@ The platform is **multi-tenant** — each business (tenant) gets its own isolate
 | Infrastructure | Redis, Supervisor, Nginx |
 | Observability | Laravel Pail, Telescope, Spatie Health, Spatie Activitylog |
 | Security | Spatie Permission, rate limiting, idempotency middleware, signed URLs |
+
+## Architecture at a glance
+
+Vito Business OS follows a **Modular Monolith** architecture enforcing **DDD + Hexagonal (Ports & Adapters)** principles:
+
+- `app/Domain` — Pure business logic: entities, enums, value objects, and port interfaces
+- `app/Application` — Orchestration layer: commands, handlers, and results
+- `app/Infrastructure` — Implementation: Eloquent models, repositories, adapters, jobs
+- `app/Http` — Delivery: controllers, requests, API resources
+- `app/Filament` — Admin panels, pages, resources, widgets
+
+<Note>
+The directory structure follows **Screaming Architecture** — the business domains are immediately visible from the folder names, not the framework tools.
+</Note>
+
+## Who uses each surface?
+
+| Actor | Surface |
+|-------|---------|
+| Visitors & buyers | Public site, discovery, microsites, checkout, appointments |
+| Business owners | Workspace app (`/workspace/*`), Filament tenant panel (`/app`) |
+| Platform operators | Filament super admin panel (`/admin`), impersonation, RBAC |
+| Developers & integrations | REST API v1 (`/api/v1/*`), webhooks, gRPC proto |

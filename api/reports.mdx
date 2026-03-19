@@ -1,0 +1,210 @@
+---
+title: "Reports & exports"
+description: "Generate sales, inventory, and kitchen reports. Download files via signed URLs."
+---
+
+<Note>
+All report generation endpoints dispatch background jobs and return `202 Accepted` immediately. A notification is sent to the requesting user when the file is ready. All report endpoints require authentication and tenant ownership.
+</Note>
+
+**Common middleware for all report endpoints:** `auth:sanctum`, `tenant.ownership`, `throttle:api`
+
+## Report generation endpoints
+
+### GET /api/v1/reports/sales/excel
+
+Queue a sales report as an Excel (`.xlsx`) file.
+
+**Route name:** `reports.sales.excel`
+
+#### Query parameters
+
+<ParamField query="start_date" type="string">
+  Start of date range in `YYYY-MM-DD` format. Must be ≤ `end_date`. Defaults to one month ago.
+</ParamField>
+
+<ParamField query="end_date" type="string">
+  End of date range in `YYYY-MM-DD` format. Must be ≥ `start_date` and ≤ today. Defaults to today.
+</ParamField>
+
+<ParamField query="status" type="string">
+  Filter by order status. One of: `pending`, `confirmed`, `processing`, `ready`, `delivered`, `cancelled`.
+</ParamField>
+
+#### Response `202 Accepted`
+
+<ResponseField name="success" type="boolean">`true`</ResponseField>
+<ResponseField name="message" type="string">Confirmation that the report is being generated.</ResponseField>
+<ResponseField name="estimated_time" type="string">Estimated completion time (approximately 1–5 minutes).</ResponseField>
+
+---
+
+### GET /api/v1/reports/sales/pdf
+
+Queue a sales report as a PDF file.
+
+**Route name:** `reports.sales.pdf`
+
+Accepts the same `start_date`, `end_date`, and `status` query parameters as the Excel endpoint.
+
+#### Response `202 Accepted`
+
+<ResponseField name="success" type="boolean">`true`</ResponseField>
+<ResponseField name="message" type="string">Confirmation that the PDF is being generated.</ResponseField>
+<ResponseField name="report_type" type="string">`sales`</ResponseField>
+<ResponseField name="estimated_time" type="string">Approximately 1–3 minutes.</ResponseField>
+
+---
+
+### GET /api/v1/reports/inventory/pdf
+
+Queue an inventory report as a PDF file.
+
+**Route name:** `reports.inventory.pdf`
+
+#### Response `202 Accepted`
+
+<ResponseField name="report_type" type="string">`inventory`</ResponseField>
+<ResponseField name="estimated_time" type="string">Approximately 1–2 minutes.</ResponseField>
+
+---
+
+### GET /api/v1/reports/kitchen/pdf
+
+Queue a kitchen preparation list as a PDF file.
+
+**Route name:** `reports.kitchen.pdf`
+
+#### Response `202 Accepted`
+
+<ResponseField name="report_type" type="string">`kitchen`</ResponseField>
+<ResponseField name="estimated_time" type="string">Approximately 30 seconds.</ResponseField>
+
+---
+
+## File download endpoints
+
+### GET /api/v1/reports/download/{path}
+
+Download a pre-generated report file. The URL is **signed** — it must be generated server-side using Laravel's `URL::signedRoute()` and will be delivered via an in-app notification.
+
+**Middleware:** `signed`  
+**Authentication:** Not required (signature is the access control)
+
+#### Path parameters
+
+<ParamField path="path" type="string" required>
+  File path relative to the local storage disk. Must start with `reports/` and have an extension of `.pdf`, `.xlsx`, or `.csv`. Path traversal characters are blocked.
+</ParamField>
+
+#### Response
+
+Streamed file download with appropriate `Content-Type`:
+
+| Extension | Content-Type |
+|-----------|--------------|
+| `.pdf` | `application/pdf` |
+| `.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
+| `.csv` | `text/csv` |
+
+#### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `403` | Signed URL signature is invalid or has expired |
+| `403` | Path contains traversal characters or disallowed extension |
+| `404` | File does not exist on the storage disk |
+
+<Warning>
+Do not construct report download URLs manually. Always use the signed URL from the notification payload.
+</Warning>
+
+---
+
+## Sales export endpoints
+
+### POST /api/v1/exports/sales
+
+Queue a filtered sales export for the authenticated user's tenant.
+
+**Middleware:** `auth:sanctum`, `tenant.ownership`, `throttle:api`  
+**Route name:** `api.exports.sales`
+
+#### Request body
+
+<ParamField body="start_date" type="string">
+  Filter start date (`YYYY-MM-DD`). Must be ≤ `end_date`.
+</ParamField>
+
+<ParamField body="end_date" type="string">
+  Filter end date (`YYYY-MM-DD`). Must be ≥ `start_date`.
+</ParamField>
+
+<ParamField body="status" type="string">
+  Filter by order status. One of: `pending`, `confirmed`, `preparing`, `ready`, `delivered`, `cancelled`.
+</ParamField>
+
+#### Response `202 Accepted`
+
+<ResponseField name="success" type="boolean">`true`</ResponseField>
+<ResponseField name="message" type="string">Confirmation that the export is processing.</ResponseField>
+<ResponseField name="status" type="string">`processing`</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://yourdomain.com/api/v1/exports/sales \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"start_date": "2025-01-01", "end_date": "2025-01-31"}'
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch('https://yourdomain.com/api/v1/exports/sales', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+  body: JSON.stringify({
+    start_date: '2025-01-01',
+    end_date: '2025-01-31',
+  }),
+});
+```
+
+</CodeGroup>
+
+---
+
+### GET /api/v1/exports/download
+
+Download a queued export file. The URL is **signed** and **authenticated**. Links are valid for 30 minutes and are delivered via the `export_ready` notification type.
+
+**Middleware:** `auth:sanctum`, `signed`  
+**Route name:** `api.exports.download`
+
+#### Query parameters
+
+<ParamField query="path" type="string" required>
+  Base64-encoded file path on the local storage disk.
+</ParamField>
+
+<ParamField query="tenant" type="string" required>
+  Tenant UUID. Must match the authenticated user's tenant.
+</ParamField>
+
+#### Response
+
+Streamed `.xlsx` file download.
+
+#### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `400` | Missing `path` or `tenant` parameters, or invalid base64 |
+| `401` | Not authenticated |
+| `403` | Authenticated user's tenant does not match the `tenant` parameter |
+| `404` | File not found or has expired (files expire after 24 hours) |

@@ -1,0 +1,57 @@
+---
+title: "Authentication overview"
+description: "How Vito Business OS handles identity across two distinct auth surfaces: browser sessions and API tokens."
+---
+
+Vito Business OS exposes two authentication surfaces that serve different clients:
+
+- **Web (session-based)** — Inertia React pages for human users. Powered by Laravel's built-in session guard.
+- **API (token-based)** — REST endpoints for mobile apps and third-party integrations. Powered by Laravel Sanctum.
+
+Neither surface shares state with the other. A valid Sanctum token does not establish a session, and a session cookie is not accepted by `auth:sanctum` routes.
+
+## Auth surfaces at a glance
+
+| Method | Driver | Guard | Primary use case | Base path |
+|--------|--------|-------|------------------|-----------|
+| Session | `session` | `web` | Inertia React UI, Filament admin | `/` |
+| Sanctum token | `sanctum` | `api` | Mobile apps, REST API clients | `/api/v1` |
+| OTP (passwordless) | Custom | `api` | Consumer login without a password | `/api/v1/otp` |
+| Social OAuth | Socialite / Sanctum | `api` | Google, Facebook, Apple, GitHub, Twitter | `/api/v1/auth/social` |
+
+## Security features
+
+**Rate limiting** is applied at the route level using named throttle aliases:
+
+- `throttle:api` — general API rate limit
+- `throttle:api.otp-generation` — strict limit on OTP generation (3 requests/hour per identifier)
+- `throttle:api.verification` — limit on OTP and coupon verification attempts
+- `throttle:api.transactions` — limit on order creation
+
+**Idempotency** middleware wraps OTP generation so that clients can safely retry the same request without sending multiple codes.
+
+**Signed URLs** protect email verification links (`/verify-email/{id}/{hash}`) and file download endpoints.
+
+**Tenant ownership isolation** is enforced by the `tenant.ownership` middleware on all protected tenant routes, preventing cross-tenant data access (IDOR).
+
+**Session rotation** is performed on login and impersonation exit to prevent session-fixation attacks.
+
+## Explore auth topics
+
+<CardGroup cols={2}>
+  <Card title="Web authentication" icon="globe" href="/auth/web-auth">
+    Register, login, password reset, email verification, and profile management via Inertia React pages.
+  </Card>
+  <Card title="API authentication" icon="key" href="/auth/api-auth">
+    Sanctum token issuance, protected routes, and push subscription management.
+  </Card>
+  <Card title="One-time passwords" icon="shield" href="/auth/otp">
+    Passwordless login flow with OTP generation, verification, and idempotency.
+  </Card>
+  <Card title="Social login" icon="user" href="/auth/social-login">
+    OAuth via Google, Facebook, Apple, GitHub, and Twitter through a single API endpoint.
+  </Card>
+  <Card title="Roles and permissions" icon="lock" href="/auth/roles-permissions">
+    Spatie Permission roles, tenant ownership middleware, and impersonation.
+  </Card>
+</CardGroup>

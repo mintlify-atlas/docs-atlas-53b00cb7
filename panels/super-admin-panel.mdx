@@ -1,0 +1,307 @@
+---
+title: "Super admin panel"
+description: "The Filament-powered platform management panel at /admin and /admin/{tenant}, restricted to super_admin users for tenant governance, billing, and system health."
+---
+
+The super admin panel is the internal operations centre for the platform team. It is served at `/admin` and `/admin/{tenant}` using SPA mode, backed by `AdminPanelProvider`. It registers the `Tenant` model for tenancy (allowing an admin to navigate into a specific tenant's context) but disables tenant switching — the relationship is always 1:1 between a super admin session and a tenant when impersonating.
+
+```
+/admin                              → dashboard
+/admin/{tenant}                     → tenant-scoped admin view
+/admin/tenants                      → business directory
+/admin/users                        → user management
+/admin/payments                     → subscription payments
+/admin/architecture-health          → event architecture health check
+```
+
+## Access and authentication
+
+| Attribute | Value |
+|---|---|
+| Panel ID | `admin` |
+| Path | `/admin` |
+| Auth guard | `web` |
+| Required role | `super_admin` |
+| Tenant model | `App\Models\Tenant` (resolved by `slug`) |
+| Tenant menu | Disabled (1:1 architecture) |
+
+Access is enforced in `AdminPanelProvider::boot()` via a `Filament::serving()` hook that runs on every request to the admin panel:
+
+```php
+// app/Providers/Filament/AdminPanelProvider.php
+Filament::serving(function () {
+    if (Filament::getCurrentPanel()->getId() !== 'admin') {
+        return;
+    }
+
+    if (! auth()->check()) {
+        return;
+    }
+
+    $user = auth()->user();
+    $isSuperAdmin = $user->role === UserRole::SUPER_ADMIN;
+
+    $superAdmins = config('auth.super_admins', []);
+    $isWhitelistedAdmin = $isSuperAdmin
+        && in_array($user->email, $superAdmins, true);
+
+    if ($isWhitelistedAdmin) {
+        return;
+    }
+
+    if (! $isSuperAdmin) {
+        abort(403, 'Acceso denegado. Se requiere rol de Super Admin.');
+    }
+});
+```
+
+A secondary whitelist in `config/auth.super_admins` allows specific email addresses to bypass the role check. Any user without `super_admin` role receives a 403.
+
+<Warning>
+The `auditor` role also has read access to the `ActivityLogResource` (bitácora). This is an explicit carve-out in `ActivityLogResource::canViewAny()` — it does not grant access to the rest of the admin panel.
+</Warning>
+
+## Dashboard widgets
+
+The admin dashboard renders a financial KPI stack sourced from `app/Filament/Widgets/`:
+
+| Widget | Purpose |
+|---|---|
+| `AccountWidget` | Authenticated admin identity card (built-in Filament) |
+| `FinancialStatsOverview` | MRR, gross revenue, conversion rate, pending payments count |
+| `AcquisitionGrowthChart` | Tenant acquisition trend over time |
+| `PlanDistributionChart` | PRO vs FREE tenant distribution chart |
+| `PendingPaymentsWidget` | Table of subscription payments awaiting manual review |
+
+`FinancialStatsOverview` computes MRR as `(active PRO tenants) × (pro_plan_price from GeneralSettings)`:
+
+```php
+// app/Filament/Widgets/FinancialStatsOverview.php
+$mrr = $proTenants * $monthlyPlanPrice;
+$totalRevenue = SubscriptionPayment::where('status', 'approved')->sum('amount');
+$conversionRate = round(($proTenants / $totalTenants) * 100, 1);
+```
+
+## Navigation groups
+
+The sidebar uses five deterministic groups defined in `AdminPanelProvider`:
+
+<AccordionGroup>
+  <Accordion title="Dashboard">
+    The main landing page with the financial KPI widget stack and pending payments table.
+  </Accordion>
+
+  <Accordion title="Gerencia (Management)">
+    High-level governance resources for managing tenants and users.
+
+    - **Negocios** — `TenantResource`: full tenant directory with approval, suspension, force-upgrade, and impersonation actions
+    - **Usuarios** — `UserResource`: platform user directory with role assignment
+  </Accordion>
+
+  <Accordion title="Negocios (Business data)">
+    Cross-tenant views of transactional data.
+
+    - **Pedidos** — `OrderResource`: platform-wide order view
+    - **Productos** — `ProductResource`: platform-wide product view
+    - **Cupones** — `CouponResource`: platform-wide coupon view
+  </Accordion>
+
+  <Accordion title="Finanzas (Finance)">
+    Financial operations requiring manual review.
+
+    - **Pagos** — `PaymentResource`: subscription payment records with approve/reject actions and proof-of-payment viewer
+  </Accordion>
+
+  <Accordion title="Configuración (Configuration)">
+    Platform-level settings, reference data, and observability. Collapsed by default.
+
+    - **Architecture Health** — `ArchitectureHealth` page: domain event compliance metrics
+    - **Billing** — `Billing` page: platform billing configuration
+    - **Configuración General** — `ManageGeneralSettings` page: prices, bank instructions, limits
+    - **Bitácora de Actividad** — `ActivityLogResource`: Spatie Activitylog viewer
+    - **Categorías** — `CategoryResource`: business category reference data
+    - **Ciudades** — `CityResource`: city reference data used in tenant registration
+  </Accordion>
+</AccordionGroup>
+
+## Resources reference
+
+<CardGroup cols={2}>
+  <Card title="TenantResource" icon="building-storefront">
+    The most feature-rich resource in the admin panel. Lists all registered businesses with health status (based on last activity), plan badge, approval status, and product count. Provides approve, reject, suspend/reactivate (kill switch), force-upgrade to PRO, and impersonation (shadow login) actions.
+  </Card>
+  <Card title="UserResource" icon="users">
+    Platform user directory. Supports role assignment (`super_admin`, `panel_user`, etc.) and search by name or email.
+  </Card>
+  <Card title="PaymentResource" icon="banknotes">
+    Subscription payment records. Admins can approve or reject manual bank-transfer payments. Approval updates the tenant's `is_pro` flag and sets `plan_expires_at`. Each record stores a proof-of-payment image path for audit.
+  </Card>
+  <Card title="ActivityLogResource" icon="shield-exclamation">
+    Read-only viewer for `spatie/laravel-activitylog` records. Filterable by event type (created, updated, deleted), entity type, causer user, and date range. Shows today's event count as a navigation badge. No create, edit, or delete actions are registered.
+  </Card>
+  <Card title="OrderResource" icon="clipboard-document-list">
+    Platform-wide order list spanning all tenants. Useful for support and reconciliation.
+  </Card>
+  <Card title="CategoryResource / CityResource" icon="tag">
+    Reference data management. Categories and cities are shared across all tenants and drive discovery, SEO landing pages, and tenant registration forms.
+  </Card>
+</CardGroup>
+
+## Impersonation (shadow login)
+
+Super admins can log in as any tenant's owner directly from the `TenantResource` table using the **Acceder como Cliente** row action. This is the platform's support and debugging tool.
+
+```php
+// app/Filament/Resources/TenantResource.php
+Action::make('impersonate')
+    ->label('Acceder como Cliente')
+    ->icon('heroicon-o-user-circle')
+    ->color('warning')
+    ->requiresConfirmation()
+    ->action(function (Tenant $record) {
+        $user = $record->user;
+
+        // Rate limit: max 5 impersonations per hour per admin
+        $rateLimitKey = 'impersonate:'.auth()->id();
+        if (\Illuminate\Support\Facades\RateLimiter::tooManyAttempts($rateLimitKey, 5)) {
+            // notify and return
+        }
+        \Illuminate\Support\Facades\RateLimiter::hit($rateLimitKey, 3600);
+
+        // Audit log for non-repudiation
+        activity('security')
+            ->causedBy(auth()->user())
+            ->performedOn($user)
+            ->withProperties(['tenant_id' => $record->id])
+            ->log('admin_impersonation_started');
+
+        session(['impersonator_id' => auth()->id()]);
+        session(['impersonator_name' => auth()->user()->name]);
+        \Illuminate\Support\Facades\Auth::login($user);
+        session()->regenerate(); // Session fixation prevention
+
+        return redirect('/app');
+    })
+```
+
+Impersonation is rate-limited to five attempts per hour per admin. Every impersonation event is recorded via Spatie Activitylog under the `security` log name. The admin's original session data is stored so the front-end can display a "return to admin" banner.
+
+To leave an impersonation session, navigate to `/impersonate/leave`.
+
+<Warning>
+Impersonation logs in as the tenant owner and redirects to `/app`. You will see and interact with their panel exactly as they do. Any changes you make while impersonating are real and affect their data.
+</Warning>
+
+## Kill switch (tenant suspension)
+
+`TenantResource` provides a **SUSPENDER / REACTIVAR** toggle action that immediately sets `is_active = false` on the tenant record:
+
+```php
+// app/Filament/Resources/TenantResource.php
+Action::make('killSwitch')
+    ->label(fn (Tenant $record): string => $record->is_active ? 'SUSPENDER' : 'REACTIVAR')
+    ->action(function (Tenant $record): void {
+        $record->update(['is_active' => ! $record->is_active]);
+    })
+```
+
+When `is_active = false`, the tenant's public microsite returns a 403 and their panel is inaccessible. The action requires confirmation and shows a destructive warning modal.
+
+## Force-upgrade to PRO
+
+Admins can activate the PRO plan for a tenant without a payment record using **Forzar PRO**:
+
+```php
+// app/Filament/Resources/TenantResource.php
+Action::make('forceUpgrade')
+    ->action(function (Tenant $record, array $data): void {
+        $months = $data['duration'] == '999' ? 1200 : (int) $data['duration'];
+
+        $record->update([
+            'is_pro' => true,
+            'plan_expires_at' => now()->addMonths($months),
+        ]);
+    })
+```
+
+Duration options are 1, 3, 6, or 12 months, plus a "permanent" option (mapped to 1200 months). Use this for gifts, trials, and internal testing only — no payment record is created.
+
+## Architecture health page
+
+`ArchitectureHealth` (`app/Filament/Pages/ArchitectureHealth.php`) surfaces domain event compliance metrics from `EventArchitectureMetricsService`. It is restricted to users where `$user->isSuperAdmin()` returns true:
+
+```php
+// app/Filament/Pages/ArchitectureHealth.php
+public static function canAccess(): bool
+{
+    $user = auth()->user();
+    return $user instanceof User && $user->isSuperAdmin();
+}
+```
+
+The page displays:
+
+- Summary counters: total events, compliant events, violations
+- Per-event compliance breakdown
+- Violation details for events that fail ADR-002 structural rules
+
+This page is located under **Configuración** in the sidebar at navigation sort 100.
+
+## Activity log viewer
+
+`ActivityLogResource` wraps the `Spatie\Activitylog\Models\Activity` model. It is read-only — create, edit, and delete are all disabled:
+
+```php
+// app/Filament/Resources/ActivityLogResource.php
+public static function canCreate(): bool { return false; }
+public static function canEdit($record): bool { return false; }
+public static function canDelete($record): bool { return false; }
+```
+
+The table displays event type (created / updated / deleted), affected entity, entity ID, description, causer name, IP address, and timestamp. A date-range filter supports audit queries over historical windows.
+
+Today's event count appears as a navigation badge:
+
+```php
+public static function getNavigationBadge(): ?string
+{
+    return (string) static::getModel()::query()->whereDate('created_at', today())->count();
+}
+```
+
+## General settings page
+
+`ManageGeneralSettings` is a Filament settings page (Spatie Laravel Settings) that controls platform-wide configuration:
+
+- `pro_plan_price` — monthly PRO subscription price (used by `FinancialStatsOverview` to compute MRR and by `ManageBilling` to display the payment amount to tenants)
+- `bank_transfer_instructions` — HTML instructions shown in the tenant billing wizard
+- `support_whatsapp_number` — support contact number
+- `free_plan_product_limit` — maximum products for free-plan tenants (used by `ProductResource::canCreate()`)
+
+## RBAC enforcement
+
+Role-based access is managed by [Spatie Laravel Permission](https://spatie.be/docs/laravel-permission). The `UserRole` enum defines platform-level roles:
+
+| Role | Access |
+|---|---|
+| `super_admin` | Full admin panel access |
+| `panel_user` | Tenant panel only |
+| `auditor` | `ActivityLogResource` read-only access |
+| `ventas` | Sales support access |
+| `soporte` | Support access |
+
+The admin panel's gate check is a direct enum comparison (`$user->role === UserRole::SUPER_ADMIN`) rather than Spatie Permission's `hasRole()`, with the email whitelist in `config/auth.super_admins` as an additional bypass layer.
+
+## Visual design
+
+| Attribute | Value |
+|---|---|
+| Primary colour | Zinc (`Color::Zinc`) |
+| Gray scale | Slate (`Color::Slate`) |
+| Font | Outfit (Google Fonts) |
+| Dark mode | Enabled |
+| Sidebar | Collapsible on desktop, navigation groups not collapsible |
+| SPA mode | Enabled |
+| Max content width | Full |
+
+The Zinc/Slate palette is intentionally distinct from the tenant panel's Indigo palette so that super admins can visually distinguish which panel they are operating in.

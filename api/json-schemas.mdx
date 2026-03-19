@@ -1,0 +1,123 @@
+---
+title: "JSON schemas"
+description: "JSON Schema contracts for domain events and API response shapes in Vito Business OS."
+---
+
+## Location
+
+All JSON schemas are stored under `resources/schemas/` in the project repository.
+
+<Tree>
+  <Tree.Folder name="resources/schemas" defaultOpen>
+    <Tree.File name="user_profile.json" />
+    <Tree.File name="user_profile.schema.json" />
+    <Tree.Folder name="auth" defaultOpen>
+      <Tree.File name="user_profile_updated.v1.json" />
+      <Tree.File name="user_password_changed.v1.json" />
+    </Tree.Folder>
+    <Tree.Folder name="events" defaultOpen>
+      <Tree.File name="user.registered.v1.json" />
+    </Tree.Folder>
+  </Tree.Folder>
+</Tree>
+
+## Available schemas
+
+| Schema file | Type | Description |
+|-------------|------|-------------|
+| `user_profile.json` | Response shape | User profile API response, scoped to `/api/v1/users/{id}` |
+| `user_profile.schema.json` | Response shape | Strict JSON Schema draft-07 version of the user profile |
+| `auth/user_profile_updated.v1.json` | Domain event | Event emitted when a user updates their profile |
+| `auth/user_password_changed.v1.json` | Domain event | Event emitted when a user changes their password |
+| `events/user.registered.v1.json` | Domain event | Event emitted when a new user completes registration |
+
+## Schema details
+
+### user_profile
+
+Defines the shape returned by user profile API endpoints. Fields:
+
+| Field | Type | Required |
+|-------|------|----------|
+| `id` | string | Yes |
+| `tenantId` | string | Yes |
+| `name` | string | Yes |
+| `email` | string | Yes |
+| `tenantName` | string \| null | No |
+| `tenantSlug` | string \| null | No |
+| `createdAt` | string (ISO 8601) | Yes |
+
+### user_profile_updated.v1
+
+Domain event schema. Version: `1`. Fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_id` | uuid | Unique instance identifier |
+| `type` | const: `auth.user_profile_updated` | Event type |
+| `schema_version` | const: `1` | Schema version |
+| `payload.user_id` | uuid | Affected user |
+| `payload.tenant_id` | uuid | Tenant context |
+| `payload.occurred_at` | date-time | ISO 8601 timestamp |
+| `payload.email_changed` | boolean | Whether email was changed |
+
+### user_password_changed.v1
+
+Domain event schema. Version: `1`. Fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_id` | uuid | Unique instance identifier |
+| `type` | const: `auth.user_password_changed` | Event type |
+| `schema_version` | const: `1` | Schema version |
+| `payload.user_id` | uuid | Affected user |
+| `payload.tenant_id` | uuid | Tenant context |
+| `payload.occurred_at` | date-time | ISO 8601 timestamp |
+| `payload.session_invalidated` | boolean | Whether all sessions were revoked |
+
+### user.registered.v1
+
+Domain event emitted when registration completes. Fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `userId` | string (UUID v7) | New user ID |
+| `tenantId` | string | Tenant the user belongs to |
+| `email` | email | Registered email address |
+| `provider` | string | Auth provider (`email`, `google`, etc.) |
+
+## Artisan commands
+
+### Publish schemas
+
+Publish the bundled schemas to the application's schema directory:
+
+```bash
+php artisan schema:publish
+```
+
+### Check compatibility
+
+Validate that the current schemas are backward-compatible with the previous version:
+
+```bash
+php artisan schema:check-compatibility
+```
+
+### Generate TypeScript types from schemas
+
+```bash
+php artisan schema:generate-types
+```
+
+## Swagger / OpenAPI endpoints
+
+| Route | Description |
+|-------|-------------|
+| `GET /api/documentation` | Swagger UI — interactive API explorer |
+| `GET /docs` | OpenAPI JSON specification |
+| `GET /mock/{schema}` | Mock API server (available in `local` environment only) |
+
+<Warning>
+The `/mock/{schema}` endpoint is only available when `APP_ENV=local`. It is not exposed in production environments.
+</Warning>

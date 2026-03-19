@@ -1,0 +1,235 @@
+---
+title: "Orders"
+description: "Create orders through the public checkout and manage tenant orders with full status lifecycle."
+---
+
+## POST /api/v1/orders
+
+Create a new order through the public storefront checkout. Does not require authentication.
+
+**Middleware:** `throttle:api.transactions`  
+**Authentication:** Not required
+
+### Request body
+
+<ParamField body="customer_name" type="string" required>
+  Full name of the customer. Maximum 255 characters.
+</ParamField>
+
+<ParamField body="customer_phone" type="string" required>
+  Customer phone number. Maximum 20 characters.
+</ParamField>
+
+<ParamField body="customer_email" type="string">
+  Customer email address.
+</ParamField>
+
+<ParamField body="customer_address" type="string">
+  Delivery address. Maximum 500 characters.
+</ParamField>
+
+<ParamField body="customer_notes" type="string">
+  Special instructions. Maximum 1000 characters.
+</ParamField>
+
+<ParamField body="delivery_type" type="string" required>
+  Must be `pickup` or `delivery`.
+</ParamField>
+
+<ParamField body="payment_method" type="string">
+  One of: `cash`, `bank_transfer`, `card`, `pending`. Defaults to `pending`.
+</ParamField>
+
+<ParamField body="coupon_code" type="string">
+  Optional discount code. Normalized to uppercase before validation.
+</ParamField>
+
+<ParamField body="location_id" type="string">
+  UUID of the pickup/delivery location. Defaults to the tenant's primary active location.
+</ParamField>
+
+<ParamField body="items" type="object[]" required>
+  Array of order line items. Minimum 1 item required.
+  <Expandable title="item properties">
+    <ResponseField name="product_id" type="integer" required>Must exist in the `products` table.</ResponseField>
+    <ResponseField name="name" type="string" required>Product display name at time of order.</ResponseField>
+    <ResponseField name="price" type="number" required>Unit price. Must be ≥ 0.</ResponseField>
+    <ResponseField name="quantity" type="integer" required>Quantity. Must be ≥ 1.</ResponseField>
+    <ResponseField name="options" type="object">Key-value map of selected product options.</ResponseField>
+    <ResponseField name="notes" type="string">Line item notes. Maximum 500 characters.</ResponseField>
+  </Expandable>
+</ParamField>
+
+### Response `201 Created`
+
+<ResponseField name="data" type="object">
+  <Expandable title="properties">
+    <ResponseField name="id" type="integer">Order ID.</ResponseField>
+    <ResponseField name="code" type="string">Tracking UUID for the customer.</ResponseField>
+    <ResponseField name="status_label" type="string">Human-readable status (e.g. `Pendiente`).</ResponseField>
+    <ResponseField name="total" type="number">Order total as a float.</ResponseField>
+    <ResponseField name="formatted_total" type="string">Total with currency symbol (e.g. `L. 150.00`).</ResponseField>
+    <ResponseField name="items_count" type="integer">Number of line items.</ResponseField>
+    <ResponseField name="payment_instructions" type="object">Dynamic payment instructions based on payment method. `null` for card payments.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://yourdomain.com/api/v1/orders \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{
+    "customer_name": "Carlos López",
+    "customer_phone": "+50488887777",
+    "delivery_type": "pickup",
+    "payment_method": "cash",
+    "items": [
+      {"product_id": 101, "name": "Pupusas de Queso", "price": 25.00, "quantity": 2}
+    ]
+  }'
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch('https://yourdomain.com/api/v1/orders', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+  body: JSON.stringify({
+    customer_name: 'Carlos López',
+    customer_phone: '+50488887777',
+    delivery_type: 'pickup',
+    payment_method: 'cash',
+    items: [
+      { product_id: 101, name: 'Pupusas de Queso', price: 25.00, quantity: 2 },
+    ],
+  }),
+});
+const { data } = await res.json();
+```
+
+</CodeGroup>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `422` | Validation failure (missing fields, invalid `product_id`, invalid `delivery_type`) |
+| `429` | Transaction rate limit exceeded |
+
+---
+
+## GET /api/v1/orders
+
+List orders for the authenticated user's tenant. Supports filtering by status.
+
+**Middleware:** `auth:sanctum`, `tenant.ownership`, `throttle:api`  
+**Authentication:** Required
+
+### Query parameters
+
+<ParamField query="status" type="string">
+  Filter by order status. One of: `pending`, `confirmed`, `processing`, `ready`, `delivered`, `cancelled`.
+</ParamField>
+
+### Response `200 OK`
+
+Paginated collection of order objects (20 per page) scoped to the authenticated tenant.
+
+<CodeGroup>
+
+```bash cURL
+curl "https://yourdomain.com/api/v1/orders?status=pending" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch('https://yourdomain.com/api/v1/orders?status=pending', {
+  headers: {
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+});
+const { data } = await res.json();
+```
+
+</CodeGroup>
+
+---
+
+## GET /api/v1/orders/{order}
+
+Fetch a single order by ID. The order must belong to the authenticated tenant.
+
+**Middleware:** `auth:sanctum`, `tenant.ownership`, `throttle:api`  
+**Authentication:** Required
+
+### Path parameters
+
+<ParamField path="order" type="integer" required>
+  Numeric order ID.
+</ParamField>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `404` | Order not found or does not belong to authenticated tenant |
+
+---
+
+## PATCH /api/v1/orders/{order}/status
+
+Transition an order to a new status.
+
+**Middleware:** `auth:sanctum`, `tenant.ownership`, `throttle:api`  
+**Authentication:** Required
+
+### Path parameters
+
+<ParamField path="order" type="integer" required>
+  Numeric order ID.
+</ParamField>
+
+### Request body
+
+<ParamField body="status" type="string" required>
+  Target status. Must be one of the allowed order statuses: `pending`, `confirmed`, `processing`, `ready`, `delivered`, `cancelled`.
+</ParamField>
+
+### Response `200 OK`
+
+Updated order resource with the same shape as the list endpoint.
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `404` | Order not found |
+| `422` | Invalid or disallowed status value |
+
+---
+
+## DELETE /api/v1/orders/{order}
+
+Cancel an order. Internally transitions the status to `cancelled`.
+
+**Middleware:** `auth:sanctum`, `tenant.ownership`, `throttle:api`  
+**Authentication:** Required
+
+### Path parameters
+
+<ParamField path="order" type="integer" required>
+  Numeric order ID.
+</ParamField>
+
+### Response `204 No Content`
+
+Empty body on success.
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `404` | Order not found or not owned by authenticated tenant |

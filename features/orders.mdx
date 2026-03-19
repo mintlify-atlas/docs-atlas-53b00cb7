@@ -1,0 +1,196 @@
+---
+title: "Orders"
+description: "Order lifecycle, state machine, real-time notifications, PDF receipts, and transactional consistency for the Vito Business OS sales flow."
+---
+
+The orders system handles the full customer purchase lifecycle — from cart submission to delivery — with real-time notifications, a structured state machine, and PDF document generation.
+
+## Order flow
+
+<Steps>
+  <Step title="Cart submission">
+    The customer builds a cart on the tenant microsite at `/t/{tenant}`. The frontend calls `POST /api/v1/orders` with cart items, customer info, and an optional coupon code.
+  </Step>
+  <Step title="Order creation">
+    The API creates an `Order` record with `status = pending` and a unique `order_number` (starting from `#1001`). Number generation uses pessimistic locking on the `Tenant` row to prevent race conditions.
+
+    ```php
+    // app/Models/Order.php
+    public static function generateOrderNumber(int|string $tenantId): string
+    {
+        return DB::transaction(function () use ($tenantId) {
+            $tenant = Tenant::whereKey($tenantId)->lockForUpdate()->first();
+            $lastOrder = static::where('tenant_id', $tenantId)
+                ->orderBy('id', 'desc')->first();
+            $nextNumber = $lastOrder
+                ? (int) str_replace('#', '', $lastOrder->order_number) + 1
+                : 1001;
+            return '#' . $nextNumber;
+        });
+    }
+    ```
+  </Step>
+  <Step title="Payment">
+    Payment confirmation triggers an `OrderEvent` with type `paid` and updates `payment_status` and `paid_at`. An outbox entry is written in the same transaction for reliable downstream processing.
+  </Step>
+  <Step title="Business notification">
+    A `NewOrderNotification` is dispatched to the tenant owner via database, mail, and broadcast channels. The Filament dashboard receives the broadcast in real time.
+  </Step>
+  <Step title="Status progression">
+    The owner advances the order through the kanban workflow. Each transition is validated by `OrderStateService` (FSM) and recorded as an `OrderEvent`.
+  </Step>
+  <Step title="Delivery">
+    On `delivered`, the lifecycle is complete. The customer receives an `OrderStatusChangedNotification` email for each status change if a customer email was provided.
+  </Step>
+</Steps>
+
+## Order statuses
+
+```php
+// app/Models/Order.php
+public const STATUS_PENDING    = 'pending';
+public const STATUS_CONFIRMED  = 'confirmed';
+public const STATUS_PROCESSING = 'processing';
+public const STATUS_READY      = 'ready';
+public const STATUS_DELIVERED  = 'delivered';
+public const STATUS_CANCELLED  = 'cancelled';
+```
+
+The Kanban board displays all statuses except `cancelled`:
+
+| Status | Label | Color |
+|---|---|---|
+| `pending` | Pendiente | warning |
+| `confirmed` | Confirmado | info |
+| `processing` | En Preparación | primary |
+| `ready` | Listo | success |
+| `delivered` | Entregado | gray |
+| `cancelled` | Cancelado | danger |
+
+## OrderItem structure
+
+Each `OrderItem` stores a frozen price snapshot at order time to preserve historical accuracy:
+
+```php
+// app/Models/OrderItem.php
+protected $fillable = [
+    'order_id',
+    'product_id',
+    'product_name',     // Snapshot of name at order time
+    'product_price',    // Snapshot of base price
+    'quantity',
+    'unit_price',       // Base price + modifier adjustments
+    'total_price',      // unit_price * quantity
+    'selected_options', // JSON: variant/addon selections
+    'line_total',
+    'notes',
+];
+```
+
+`OrderItem::fromCartItem()` is a factory method that computes modifiers from the cart payload:
+
+```php
+// app/Models/OrderItem.php
+public static function fromCartItem(array $cartItem): self
+{
+    $productPrice = (float) ($cartItem['price'] ?? 0);
+    $options = $cartItem['options'] ?? [];
+    $optionsTotal = collect($options)->sum('price');
+    $unitPrice = $productPrice + $optionsTotal;
+
+    return new self([
+        'product_id'      => $cartItem['product_id'] ?? $cartItem['id'],
+        'unit_price'      => $unitPrice,
+        'quantity'        => $cartItem['quantity'] ?? 1,
+        'selected_options' => $options,
+        'total_price'     => $unitPrice * ($cartItem['quantity'] ?? 1),
+    ]);
+}
+```
+
+## Cancellation rules
+
+```php
+// app/Models/Order.php
+public function cancel(string $reason, int $cancelledByUserId): void
+{
+    if ($this->status === self::STATUS_CANCELLED) {
+        return; // Idempotent
+    }
+    if ($this->status === self::STATUS_DELIVERED) {
+        throw new OrderCannotBeCancelledException(
+            "Order #{$this->order_number} cannot be cancelled: already delivered"
+        );
+    }
+    $this->status = self::STATUS_CANCELLED;
+    $this->cancellation_reason = $reason;
+    $this->cancelled_at = now();
+    $this->cancelled_by = $cancelledByUserId;
+}
+```
+
+Orders in `delivered` status cannot be cancelled. All other statuses can be cancelled with a mandatory reason.
+
+## Real-time notifications
+
+Order events are broadcast via Laravel Reverb + Echo. Channels are defined in `routes/channels.php`:
+
+- `private-tenant.{tenantId}` — order updates for the tenant dashboard
+- `private-order.{orderId}` — per-order tracking for customers
+
+Broadcast events include: `paid`, `cancelled`, `shipped`, `refunded`.
+
+The tenant dashboard subscribes to `private-tenant.{tenantId}` to receive `NewOrderNotification` payloads in real time without polling.
+
+## OrderEvent (event history)
+
+Each status transition creates an `OrderEvent` record, providing an immutable audit trail:
+
+```php
+// app/Models/Order.php
+public function events(): HasMany
+{
+    return $this->hasMany(OrderEvent::class)->orderBy('occurred_at');
+}
+```
+
+Query patterns:
+
+```php
+$order->events()->latest('occurred_at')->get();
+$order->events()->where('event_type', 'status_changed')->get();
+```
+
+## Outbox transactional consistency
+
+Order state changes write to an outbox table in the same database transaction as the model update. The `outbox:process` Artisan command processes the outbox every minute, fanning out to downstream consumers (analytics, notifications, webhooks).
+
+This ensures events are never lost even if the queue worker is down at the time of the order state change.
+
+## PDF receipt and ticket download
+
+Two document types are available for each order:
+
+| Route | Description |
+|---|---|
+| `GET /workspace/orders/{order}/receipt` | PDF receipt for the customer (signed download) |
+| `GET /workspace/orders/{order}/print-ticket` | Printable kitchen ticket |
+
+Downloads use signed URLs (`middleware: signed`) to prevent unauthorized access.
+
+## Order management panel
+
+In the tenant workspace at `/workspace/orders`, the `OrderController` exposes:
+
+```
+GET  /workspace/orders              Paginated order list
+PUT  /workspace/orders/{id}/status  Update order status
+GET  /workspace/orders/{id}/receipt Download PDF receipt (signed)
+GET  /workspace/orders/{id}/print-ticket Print kitchen ticket
+```
+
+The Filament tenant panel at `/app` exposes the same data via `OrderResource` with a richer filter and export interface.
+
+## WhatsApp order notification
+
+The `Order::buildWhatsAppMessage()` method generates a formatted WhatsApp message with the order summary and a real-time tracking URL. The `getWhatsAppUrl()` method normalizes Honduran local phone numbers (8-digit) to international format (`504XXXXXXXX`) automatically.

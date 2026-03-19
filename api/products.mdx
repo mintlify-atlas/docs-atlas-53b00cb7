@@ -1,0 +1,144 @@
+---
+title: "Products"
+description: "Public product catalog endpoints with tenant scoping and 600-second response caching."
+---
+
+<Note>
+Product endpoints are public — no authentication is required. All requests must include a `tenant_id` query parameter to scope results to the correct business.
+</Note>
+
+## GET /api/v1/products
+
+List products for a tenant. Results are cached for **600 seconds** per tenant/filter combination.
+
+**Middleware:** `throttle:api`, `cacheResponse:600`  
+**Authentication:** Not required
+
+### Query parameters
+
+<ParamField query="tenant_id" type="integer" required>
+  Numeric ID of the tenant whose catalog to fetch. Returns `400` when absent.
+</ParamField>
+
+<ParamField query="search" type="string">
+  Full-text search term to filter products by name or description.
+</ParamField>
+
+<ParamField query="category" type="string">
+  Filter by category name.
+</ParamField>
+
+### Response `200 OK`
+
+Paginated collection of product objects (20 per page).
+
+<ResponseField name="data" type="object[]">
+  <Expandable title="properties">
+    <ResponseField name="id" type="integer">Product ID.</ResponseField>
+    <ResponseField name="name" type="string">Display name.</ResponseField>
+    <ResponseField name="slug" type="string">URL-friendly slug.</ResponseField>
+    <ResponseField name="price" type="number">Price as a float (e.g. `25.00`).</ResponseField>
+    <ResponseField name="formatted_price" type="string">Human-readable price with currency symbol (e.g. `L. 25.00`).</ResponseField>
+    <ResponseField name="description" type="string">Truncated description, max 100 characters.</ResponseField>
+    <ResponseField name="image_url" type="string">Absolute URL to the product image, or `null`.</ResponseField>
+    <ResponseField name="category" type="string">Category name, or `null`.</ResponseField>
+    <ResponseField name="stock_status" type="string">
+      One of: `in_stock`, `out_of_stock`, `on_backorder`, `low_stock`, `discontinued`, `pre_order`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="links" type="object">Standard Laravel pagination links.</ResponseField>
+<ResponseField name="meta" type="object">Pagination metadata (current page, total, per page).</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl "https://yourdomain.com/api/v1/products?tenant_id=1&category=Desayunos" \
+  -H "Accept: application/json"
+```
+
+```typescript TypeScript (fetch)
+const params = new URLSearchParams({
+  tenant_id: '1',
+  category: 'Desayunos',
+});
+
+const res = await fetch(
+  `https://yourdomain.com/api/v1/products?${params}`,
+  { headers: { 'Accept': 'application/json' } }
+);
+
+const { data, meta } = await res.json();
+```
+
+</CodeGroup>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `400` | `tenant_id` missing or zero |
+
+---
+
+## GET /api/v1/products/{id}
+
+Fetch a single product by ID. Also requires `tenant_id` to enforce ownership scoping. Response is cached for **600 seconds**.
+
+**Middleware:** `throttle:api`, `cacheResponse:600`  
+**Authentication:** Not required
+
+### Path parameters
+
+<ParamField path="id" type="integer" required>
+  Numeric product ID.
+</ParamField>
+
+### Query parameters
+
+<ParamField query="tenant_id" type="integer" required>
+  Numeric tenant ID. Product must belong to this tenant.
+</ParamField>
+
+### Response `200 OK`
+
+Single product object with the same shape as items in the list endpoint.
+
+<ResponseField name="data" type="object">
+  <Expandable title="properties">
+    <ResponseField name="id" type="integer">Product ID.</ResponseField>
+    <ResponseField name="name" type="string">Display name.</ResponseField>
+    <ResponseField name="slug" type="string">URL-friendly slug.</ResponseField>
+    <ResponseField name="price" type="number">Price as a float.</ResponseField>
+    <ResponseField name="formatted_price" type="string">Formatted price with currency symbol.</ResponseField>
+    <ResponseField name="description" type="string">Truncated description.</ResponseField>
+    <ResponseField name="image_url" type="string">Image URL or `null`.</ResponseField>
+    <ResponseField name="category" type="string">Category name or `null`.</ResponseField>
+    <ResponseField name="stock_status" type="string">Current stock status.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl "https://yourdomain.com/api/v1/products/101?tenant_id=1" \
+  -H "Accept: application/json"
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch(
+  `https://yourdomain.com/api/v1/products/101?tenant_id=1`,
+  { headers: { 'Accept': 'application/json' } }
+);
+const { data } = await res.json();
+```
+
+</CodeGroup>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `400` | `tenant_id` missing or zero |
+| `404` | Product not found for the given tenant |

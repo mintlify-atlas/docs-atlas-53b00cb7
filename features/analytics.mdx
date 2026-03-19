@@ -1,0 +1,161 @@
+---
+title: "Analytics"
+description: "Visitor tracking, interaction counting, API endpoints for event ingestion, aggregation jobs, and exportable reports."
+---
+
+The analytics module tracks how visitors interact with tenant microsites, aggregates that data into daily summaries, and surfaces it in the tenant dashboard via Recharts visualizations.
+
+## Models
+
+### TenantVisit
+
+Records each unique daily session for a visitor on a tenant's microsite:
+
+```php
+// app/Models/TenantVisit.php
+protected $fillable = [
+    'session_hash',  // Privacy-safe fingerprint (SHA-256)
+    'user_agent',
+    'referer',
+    'device_type',   // 'mobile', 'tablet', 'desktop', 'bot'
+];
+```
+
+The session hash uses a daily rotating salt so the same visitor produces the same hash within a UTC day, but different hashes across days:
+
+```php
+// app/Models/TenantVisit.php
+public static function generateSessionHash(
+    string $ip,
+    string $userAgent,
+    string|int $tenantId
+): string {
+    $utcDate = now('UTC')->format('Y-m-d');
+    // Dedicated analytics salt — decoupled from app key rotation
+    $analyticsSalt = config('services.analytics.salt', 'default-salt');
+    $fingerprint = implode('|', [$ip, $userAgent, $tenantId, $utcDate . $analyticsSalt]);
+    return hash('sha256', $fingerprint);
+}
+```
+
+Device type is detected from the user agent:
+
+```php
+// app/Models/TenantVisit.php
+public static function detectDeviceType(string $userAgent): string
+{
+    if (preg_match('/bot|crawl|spider/i', $userAgent)) return 'bot';
+    if (preg_match('/mobile|android|iphone/i', $userAgent)) return 'mobile';
+    if (preg_match('/tablet|ipad|kindle/i', $userAgent)) return 'tablet';
+    return 'desktop';
+}
+```
+
+### TenantAnalytic
+
+Aggregated daily summary per tenant:
+
+```php
+// app/Models/TenantAnalytic.php
+protected $fillable = [
+    'date',           // DATE column
+    'unique_visits',  // Distinct session_hash count
+    'total_visits',   // Raw page view count
+];
+```
+
+The `analytics sync` job rolls up `TenantVisit` rows into `TenantAnalytic` records each day.
+
+## API endpoints
+
+### Track an interaction
+
+```
+POST /api/v1/analytics/track
+```
+
+Records a tenant microsite visit or interaction. Accepts:
+
+```json
+{
+  "tenant_id": 123,
+  "event_type": "page_view",
+  "metadata": {}
+}
+```
+
+### Record a conversion
+
+```
+POST /api/v1/analytics/conversion
+```
+
+Tracks a high-value action (e.g., checkout initiated, WhatsApp contact started) for conversion rate reporting.
+
+### Fetch dashboard data
+
+```
+GET /analytics/data   (requires auth)
+```
+
+Served by `AnalyticsController` in the tenant workspace. Returns time-series data for Recharts consumption.
+
+## Web interaction tracking
+
+Three redirect routes in `web.php` record interaction clicks before forwarding the user:
+
+| Route | Interaction type |
+|---|---|
+| `GET /track/wa/{tenant:slug}` | WhatsApp click |
+| `GET /track/call/{tenant:slug}` | Phone call click |
+| `GET /track/maps/{tenant:slug}` | Maps/location click |
+
+All three are rate-limited to 60 requests per minute per IP via `throttle:60,1` middleware.
+
+Each hit creates an `Interaction` model record linked to the tenant, enabling click-through analytics in the dashboard.
+
+## Analytics sync job
+
+The analytics sync job aggregates raw `TenantVisit` rows into `TenantAnalytic` daily summaries. It runs as a queued job and can be dispatched on demand or triggered by the scheduler.
+
+## Exportable reports
+
+Tenants can download their data as PDF or Excel exports:
+
+| Route | Output |
+|---|---|
+| `GET /workspace/reports/sales-pdf` | Sales report PDF |
+| `GET /workspace/reports/inventory-pdf` | Inventory report PDF |
+| `GET /api/v1/reports/download/{path}` | Download pre-generated report (signed) |
+| `GET /api/v1/exports/download` | Download export file |
+
+Report generation is asynchronous — the `ReportReadyNotification` is dispatched when the file is ready, delivered via database, mail, and broadcast channels.
+
+Export jobs:
+- `SalesExport` — generates Excel via Laravel Excel
+- `ReportJob` — generates PDF via a reporting package
+
+## Dashboard frontend
+
+The tenant workspace dashboard renders analytics with **Recharts** (React charting library). Data flows:
+
+1. Page load triggers `GET /analytics/data`
+2. `AnalyticsController` queries `TenantAnalytic` for the selected date range
+3. Response is passed as Inertia props
+4. React renders `<LineChart>`, `<BarChart>`, and summary stat cards using the Recharts components
+
+## Scopes
+
+```php
+// app/Models/TenantVisit.php
+public function scopeInDateRange($query, $startDate, $endDate)
+{
+    return $query->whereBetween('created_at', [$startDate, $endDate]);
+}
+
+public function scopeThisMonth($query)
+{
+    return $query->whereMonth('created_at', now()->month)
+                 ->whereYear('created_at',  now()->year);
+}
+```

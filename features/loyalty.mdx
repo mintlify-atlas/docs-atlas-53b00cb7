@@ -1,0 +1,167 @@
+---
+title: "Loyalty"
+description: "Points-based loyalty programs with earn ratios, redeemable rewards, and an append-only ledger for full audit trails."
+---
+
+The loyalty system lets tenants run a points-based rewards program for their customers. Each tenant configures one program with its earn and redemption ratios. Points are tracked in an append-only ledger for full auditability.
+
+## Models overview
+
+<CardGroup cols={2}>
+  <Card title="LoyaltyProgram" icon="gear">
+    Per-tenant configuration: earn ratio, redemption ratio, expiry policy. One program per tenant.
+  </Card>
+  <Card title="LoyaltyReward" icon="gift">
+    Catalog of redeemable items with a points cost and optional stock limit.
+  </Card>
+  <Card title="LoyaltyLedger" icon="list">
+    Append-only transaction log. Never updated — corrections insert new rows.
+  </Card>
+</CardGroup>
+
+## LoyaltyProgram
+
+```php
+// app/Models/LoyaltyProgram.php
+protected $fillable = [
+    'name',
+    'earn_ratio',        // Spend this many currency units to earn 1 point
+    'redemption_ratio',  // This many points = 1 currency unit
+    'expiry_days',       // null = points never expire
+    'is_active',
+];
+```
+
+**Invariant:** One program per tenant (unique constraint on `tenant_id`).
+
+### Point calculation
+
+```php
+// app/Models/LoyaltyProgram.php
+
+// Points earned for a given order total
+public function calculatePoints(float|string $orderTotal): int
+{
+    if (!$this->is_active || $this->earn_ratio <= 0) return 0;
+    return (int) floor((float) $orderTotal / $this->earn_ratio);
+}
+
+// Currency value of a given point balance
+public function calculateRedemptionValue(int $points): float
+{
+    if ($this->redemption_ratio <= 0) return 0.0;
+    return round($points / $this->redemption_ratio, 2);
+}
+```
+
+**Example:** With `earn_ratio = 10`, a customer spending L.100 earns 10 points. With `redemption_ratio = 100`, those 10 points are worth L.0.10.
+
+## LoyaltyReward
+
+Rewards are the items customers can redeem from the catalog:
+
+```php
+// app/Models/LoyaltyReward.php
+protected $fillable = [
+    'name',
+    'description',
+    'points_cost',  // Points required for redemption
+    'stock',        // -1 = unlimited
+    'is_active',
+];
+```
+
+### Availability check
+
+```php
+// app/Models/LoyaltyReward.php
+public function isAvailable(): bool
+{
+    if (!$this->is_active) return false;
+    if ($this->stock === -1) return true;  // Unlimited
+    return $this->stock > 0;
+}
+```
+
+When a customer redeems a reward, `decrementStock()` reduces the count atomically:
+
+```php
+// app/Models/LoyaltyReward.php
+public function decrementStock(): void
+{
+    if ($this->stock > 0) {
+        $this->decrement('stock');
+    }
+}
+```
+
+Use the `available` scope to fetch rewards customers can currently redeem:
+
+```php
+LoyaltyReward::available()->get();
+// WHERE is_active = 1 AND (stock = -1 OR stock > 0)
+```
+
+## LoyaltyLedger
+
+The ledger is an **append-only** audit log of all point transactions.
+
+```php
+// app/Models/LoyaltyLedger.php
+public const TYPE_EARN       = 'earn';       // Points from order completion
+public const TYPE_REDEEM     = 'redeem';     // Points spent on a reward
+public const TYPE_EXPIRE     = 'expire';     // Points that have lapsed
+public const TYPE_ADJUSTMENT = 'adjustment'; // Manual admin correction
+
+protected $fillable = [
+    'user_id',
+    'order_id',      // For earn transactions
+    'type',
+    'amount',        // Integer (positive = credit, negative = debit)
+    'description',
+    'expires_at',
+];
+```
+
+**Invariants:**
+- `amount` is always an integer — no floating-point point math.
+- A user's active balance is `SUM(amount) WHERE tenant_id = X AND (expires_at IS NULL OR expires_at > NOW())`.
+- Never update existing ledger rows. Insert a corrective entry with `TYPE_ADJUSTMENT`.
+
+### Useful scopes
+
+```php
+// app/Models/LoyaltyLedger.php
+
+// Active (non-expired) points
+public function scopeActive($query)
+{
+    return $query->where(function ($q) {
+        $q->whereNull('expires_at')->orWhere('expires_at', '>', now());
+    });
+}
+
+// Earned points that have since expired (for expiry processing)
+public function scopeExpired($query)
+{
+    return $query->where('type', self::TYPE_EARN)
+        ->whereNotNull('expires_at')
+        ->where('expires_at', '<=', now());
+}
+```
+
+## How points flow
+
+1. **Earn:** When an order is completed, the system calls `LoyaltyProgram::calculatePoints($order->total)` and inserts an `earn` ledger entry linked to the order.
+2. **Redeem:** Customer selects a `LoyaltyReward`. The system inserts a `redeem` entry with a negative `amount` equal to `$reward->points_cost`.
+3. **Expire:** A scheduled process queries `expired` scope and inserts `expire` entries to zero out lapsed points.
+4. **Adjust:** Admins can insert `adjustment` entries directly to correct discrepancies.
+
+## Panel management
+
+The Filament tenant panel at `/app` includes:
+
+- **`LoyaltyProgramResource`** — configure earn ratio, redemption ratio, expiry policy, and toggle the program active state.
+- **`LoyaltyRewardResource`** — manage the rewards catalog with stock tracking.
+
+The super admin panel at `/admin` can view ledger data across all tenants for audit purposes.

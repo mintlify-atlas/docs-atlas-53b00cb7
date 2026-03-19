@@ -1,0 +1,145 @@
+---
+title: "Social login"
+description: "Authenticate users through OAuth providers (Google, Facebook, Apple, GitHub, Twitter) via a single API endpoint."
+---
+
+Vito provides social authentication through a single JSON endpoint. The client handles the OAuth redirect and token exchange directly with the provider (e.g., using the Google Sign-In SDK), then sends the provider token and identity data to the API. The server validates the credentials, creates or matches the user account, and issues a Sanctum token.
+
+## Supported providers
+
+| Provider | `provider` value |
+|----------|------------------|
+| Google | `google` |
+| Facebook | `facebook` |
+| Apple | `apple` |
+| GitHub | `github` |
+| Twitter | `twitter` |
+
+Only providers in this whitelist are accepted. Requests with an unrecognised provider value are rejected with a `422` validation error.
+
+## Endpoint
+
+```
+POST /api/v1/auth/social
+```
+
+**Middleware:** `throttle:api`
+
+### Request
+
+```bash
+POST /api/v1/auth/social
+Content-Type: application/json
+Idempotency-Key: <uuid>
+
+{
+  "provider": "google",
+  "token": "<oauth-access-token>",
+  "provider_id": "104...",
+  "email": "user@gmail.com",
+  "name": "Jane Smith",
+  "avatar": "https://lh3.googleusercontent.com/..."
+}
+```
+
+<ParamField body="provider" type="string" required>
+  OAuth provider name. Must be one of: `google`, `facebook`, `apple`, `github`, `twitter`.
+</ParamField>
+
+<ParamField body="token" type="string" required>
+  OAuth access token issued by the provider. Maximum 4096 characters (enforced to prevent memory-exhaustion attacks).
+</ParamField>
+
+<ParamField body="provider_id" type="string" required>
+  The user's unique ID within the provider's system (e.g. Google subject ID). Maximum 255 characters.
+</ParamField>
+
+<ParamField body="email" type="string" required>
+  Email address from the OAuth profile. Validated with RFC and DNS checks.
+</ParamField>
+
+<ParamField body="name" type="string">
+  Display name from the OAuth profile. If omitted, the local part of the email is used.
+</ParamField>
+
+<ParamField body="avatar" type="string">
+  URL to the user's profile image. Maximum 2048 characters. Must be a valid URL.
+</ParamField>
+
+### Response — authenticated user
+
+When the provider identity matches an existing account or a new account is created:
+
+```json
+{
+  "user": {
+    "id": "<uuid>",
+    "name": "Jane Smith",
+    "email": "user@gmail.com"
+  },
+  "token": "2|xyz789...",
+  "redirect_to": "/dashboard"
+}
+```
+
+<ResponseField name="token" type="string">
+  Sanctum token named `social-api-token`. Use it as a Bearer token in subsequent requests.
+</ResponseField>
+
+<ResponseField name="redirect_to" type="string">
+  Either `/dashboard` for existing users or `/onboarding` if the account requires additional setup.
+</ResponseField>
+
+### Response — onboarding required
+
+If the social identity is new and the user needs to complete a profile:
+
+```json
+{
+  "user": {
+    "id": "<uuid>",
+    "name": "Jane Smith",
+    "email": "user@gmail.com"
+  },
+  "token": "2|xyz789...",
+  "redirect_to": "/onboarding"
+}
+```
+
+The `redirect_to` value is set to `/onboarding` when `AuthStatus::REQUIRES_ONBOARDING` is returned by the domain handler.
+
+## How it works
+
+The `AuthController::socialLogin` method constructs a `LoginViaSocialProviderCommand` from the validated request data and dispatches it to the `LoginViaSocialProviderHandler`:
+
+```php
+$command = new LoginViaSocialProviderCommand(
+    tenantId: $this->resolveTenantId(),
+    providerName: ProviderName::from(strtolower($validated['provider'])),
+    providerId: $validated['provider_id'],
+    email: $validated['email'],
+    name: $validated['name'] ?? explode('@', $validated['email'])[0],
+    avatarUrl: $validated['avatar'],
+    accessToken: $validated['token'],
+    refreshToken: null,
+    idempotencyKey: (string) $request->header('Idempotency-Key', Str::uuid()->toString()),
+);
+
+$result = $handler->handle($command);
+$tokenData = $this->tokenService->createTokenForUser($result->userId, 'social-api-token');
+```
+
+The handler links the OAuth identity to an existing user by `provider_id` or `email`, or creates a new user record if neither matches.
+
+## Idempotency
+
+The `Idempotency-Key` header is accepted but not strictly required. If omitted, the handler generates a UUID internally. Providing the key prevents duplicate account creation if the client retries a timed-out request.
+
+## Error responses
+
+| Scenario | HTTP status | Field |
+|----------|-------------|-------|
+| Invalid provider | `422` | `provider` |
+| Token exceeds 4096 characters | `422` | `token` |
+| Missing or invalid email | `422` | `email` |
+| Tenant context cannot be resolved | `422` | `tenant` |

@@ -1,0 +1,182 @@
+---
+title: "API authentication"
+description: "Sanctum token authentication for the REST API, including token issuance, protected routes, and push subscription management."
+---
+
+The REST API uses Laravel Sanctum for stateless token authentication. Every protected API request must carry a Bearer token in the `Authorization` header.
+
+<Note>
+API routes live under the `/api/v1` prefix. No session cookie is accepted — the `auth:sanctum` guard validates only the token.
+</Note>
+
+## Obtaining a token
+
+Registering via the API issues a Sanctum token in the same response.
+
+```bash
+POST /api/v1/register
+Content-Type: application/json
+```
+
+### Request body
+
+<ParamField body="name" type="string" required>
+  Full name of the user.
+</ParamField>
+
+<ParamField body="email" type="string" required>
+  Email address. Must be unique across all users.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Minimum 8 characters. Must be confirmed.
+</ParamField>
+
+<ParamField body="password_confirmation" type="string" required>
+  Must match `password`.
+</ParamField>
+
+<ParamField body="tenant_name" type="string" required>
+  Display name of the organization (up to 255 characters).
+</ParamField>
+
+<ParamField body="tenant_domain" type="string" required>
+  URL-safe slug for the organization. Must be unique across all tenants (`alpha_dash` format).
+</ParamField>
+
+### Response `201 Created`
+
+```json
+{
+  "user": {
+    "id": "uuid",
+    "name": "Jane Smith",
+    "email": "jane@example.com"
+  },
+  "token": "1|abc123...",
+  "redirect_to": "/dashboard"
+}
+```
+
+The `Location` header is also set to the user profile URL: `GET /api/v1/user`.
+
+<ResponseField name="user.id" type="string">
+  UUID of the newly created user.
+</ResponseField>
+
+<ResponseField name="user.email" type="string">
+  Email address of the user.
+</ResponseField>
+
+<ResponseField name="token" type="string">
+  Sanctum personal access token. Include this in subsequent requests.
+</ResponseField>
+
+<ResponseField name="redirect_to" type="string">
+  Suggested client-side redirect path after registration.
+</ResponseField>
+
+## Using the token
+
+Pass the token in every authenticated request:
+
+```bash
+curl https://your-app.com/api/v1/user \
+  -H "Authorization: Bearer 1|abc123..."
+```
+
+```typescript
+const response = await fetch('/api/v1/user', {
+  headers: {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/json',
+  },
+});
+```
+
+## Protected routes
+
+Routes that require a valid Sanctum token use `middleware('auth:sanctum')`.
+
+### User profile
+
+```
+GET /api/v1/user
+Authorization: Bearer {token}
+```
+
+Returns the authenticated user record.
+
+### Tenant-scoped routes
+
+The following groups require both `auth:sanctum` and `tenant.ownership` middleware:
+
+| Resource | Routes |
+|----------|--------|
+| Orders | `GET /api/v1/orders`, `GET /api/v1/orders/{order}`, `PATCH /api/v1/orders/{order}/status`, `DELETE /api/v1/orders/{order}` |
+| Settings | `GET /api/v1/settings`, `POST /api/v1/settings/update` |
+| Reports | `GET /api/v1/reports/sales/excel`, `GET /api/v1/reports/sales/pdf`, `GET /api/v1/reports/inventory/pdf`, `GET /api/v1/reports/kitchen/pdf` |
+| Exports | `POST /api/v1/exports/sales` |
+| Notifications | `GET /api/v1/notifications`, `GET /api/v1/notifications/count`, `PATCH /api/v1/notifications/read-all`, `PATCH /api/v1/notifications/{id}/read` |
+| AI tools | `POST /api/v1/ai/generate`, `POST /api/v1/ai/optimize-profile` |
+
+<Warning>
+The `tenant.ownership` middleware checks every route-model-bound parameter against the authenticated user's tenants. A mismatch returns `404` and logs a `TENANT_OWNERSHIP_VIOLATION` security event — it does not return `403` to avoid disclosing resource existence.
+</Warning>
+
+## Token scopes and revocation
+
+Tokens are named at creation time (`api-token` for registration, `social-api-token` for social login). Vito does not currently define granular Sanctum token abilities — every token grants full API access for the owning user.
+
+To revoke a token, delete it from the `personal_access_tokens` table or use Laravel's `currentAccessToken()->delete()` in a logout action.
+
+## Push subscriptions
+
+Authenticated users can register a browser for Web Push notifications.
+
+### Register a push subscription
+
+```bash
+POST /api/v1/push-subscriptions
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "endpoint": "https://fcm.googleapis.com/fcm/send/...",
+  "keys": {
+    "p256dh": "...",
+    "auth": "..."
+  },
+  "contentEncoding": "aesgcm"
+}
+```
+
+<ParamField body="endpoint" type="string" required>
+  The push service URL provided by the browser (max 1000 characters).
+</ParamField>
+
+<ParamField body="keys.p256dh" type="string" required>
+  Elliptic-curve Diffie-Hellman public key.
+</ParamField>
+
+<ParamField body="keys.auth" type="string" required>
+  Auth secret from the browser's push subscription.
+</ParamField>
+
+<ParamField body="contentEncoding" type="string">
+  Encryption scheme. Defaults to `aesgcm`.
+</ParamField>
+
+### Remove a push subscription
+
+```bash
+DELETE /api/v1/push-subscriptions
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "endpoint": "https://fcm.googleapis.com/fcm/send/..."
+}
+```
+
+Both endpoints require `auth:sanctum` and return `{ "status": "success" }` on success.

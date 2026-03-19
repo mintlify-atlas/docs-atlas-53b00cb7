@@ -1,0 +1,90 @@
+---
+title: "API Reference"
+description: "Complete reference for the Vito Business OS REST API v1."
+---
+
+## Base URL
+
+All API endpoints are prefixed with `/api/v1`.
+
+```
+https://yourdomain.com/api/v1
+```
+
+## Interactive docs
+
+Swagger UI is available at `/api/documentation` on any running instance. The underlying OpenAPI specification is served from that same path as JSON.
+
+## Request format
+
+All requests and responses use **JSON**. Set `Content-Type: application/json` and `Accept: application/json` on every request.
+
+## Authentication
+
+The API uses **Laravel Sanctum** bearer tokens. Pass your token in the `Authorization` header:
+
+```
+Authorization: Bearer <token>
+```
+
+See [Authentication](/api/authentication) for how to obtain a token.
+
+## Versioning
+
+The current stable version is **v1**. The version prefix is part of every URL (`/api/v1/...`). Breaking changes will be released under a new version prefix.
+
+## Available endpoint groups
+
+<CardGroup cols={2}>
+  <Card title="Auth" icon="key" href="/api/auth">
+    Register, OTP flow, social login, and current user.
+  </Card>
+  <Card title="Products" icon="tag" href="/api/products">
+    Public product catalog with tenant scoping and caching.
+  </Card>
+  <Card title="Orders" icon="shopping-cart" href="/api/orders">
+    Create and manage tenant orders with status transitions.
+  </Card>
+  <Card title="Coupons" icon="ticket" href="/api/coupons">
+    Verify coupon codes and list available discounts.
+  </Card>
+  <Card title="Analytics" icon="chart-bar" href="/api/analytics">
+    Track page views, interactions, and conversion events.
+  </Card>
+  <Card title="AI" icon="sparkles" href="/api/ai">
+    AI-powered business profile generation and optimization.
+  </Card>
+  <Card title="Notifications" icon="bell" href="/api/notifications">
+    List, count, and mark notifications; manage push subscriptions.
+  </Card>
+  <Card title="Reports" icon="file-chart-column" href="/api/reports">
+    Generate and download sales, inventory, and kitchen reports.
+  </Card>
+</CardGroup>
+
+## Error format
+
+All error responses follow a consistent JSON structure:
+
+```json
+{
+  "message": "Human-readable error description",
+  "errors": {
+    "field_name": ["Validation message"]
+  }
+}
+```
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Success |
+| `201` | Created |
+| `202` | Accepted (async job dispatched) |
+| `204` | No content |
+| `400` | Bad request |
+| `401` | Unauthenticated |
+| `403` | Forbidden |
+| `404` | Not found |
+| `422` | Validation error |
+| `429` | Rate limit exceeded |
+| `500` | Server error |

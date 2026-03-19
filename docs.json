@@ -1,122 +1,131 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Vito Business OS",
+  "theme": "maple",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#6366f1",
+    "light": "#e0e7ff",
+    "dark": "#3730a3"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/AugustoMelara-Dev/Vito-Business-OS"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/AugustoMelara-Dev/Vito-Business-OS"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Architecture",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "architecture/overview",
+              "architecture/modular-monolith",
+              "architecture/bounded-contexts",
+              "architecture/request-lifecycle"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Core Features",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "features/multi-tenancy",
+              "features/catalog",
+              "features/orders",
+              "features/bookings",
+              "features/marketing",
+              "features/loyalty",
+              "features/analytics",
+              "features/ai-enrichment"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Authentication",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "auth/overview",
+              "auth/web-auth",
+              "auth/api-auth",
+              "auth/otp",
+              "auth/social-login",
+              "auth/roles-permissions"
+            ]
+          },
+          {
+            "group": "Admin Panels",
+            "pages": [
+              "panels/tenant-panel",
+              "panels/super-admin-panel"
+            ]
+          },
+          {
+            "group": "Realtime & Notifications",
+            "pages": [
+              "realtime/broadcasting",
+              "realtime/push-notifications",
+              "realtime/pwa"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/deployment",
+              "operations/scheduler",
+              "operations/queues-jobs",
+              "operations/health-checks",
+              "operations/security"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Overview",
             "pages": [
-              "api-reference/introduction"
+              "api/overview",
+              "api/authentication",
+              "api/rate-limiting"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Endpoints",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/auth",
+              "api/products",
+              "api/orders",
+              "api/coupons",
+              "api/analytics",
+              "api/ai",
+              "api/notifications",
+              "api/reports"
+            ]
+          },
+          {
+            "group": "Contracts",
+            "pages": [
+              "api/json-schemas",
+              "api/typescript-types",
+              "api/grpc-proto",
+              "api/webhooks"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

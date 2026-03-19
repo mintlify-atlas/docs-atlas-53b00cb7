@@ -1,0 +1,249 @@
+---
+title: "Bounded contexts"
+description: "All fifteen bounded contexts in Vito Business OS: what each one owns, which domain events it emits, and how contexts communicate."
+---
+
+Vito Business OS is divided into fifteen **bounded contexts**. Each context owns its entities, events, and business rules. Contexts communicate through domain events and explicit public interfaces — never by importing each other's internal classes directly.
+
+<Note>
+Cross-context coupling is prohibited. `Sales` must not instantiate `Identity` classes directly. Use public interfaces or subscribe to domain events.
+</Note>
+
+## Context map
+
+| Context | Primary directory | Key responsibility |
+|---------|------------------|-------------------|
+| Identity | `app/Domain/Identity` | Users, roles, and tenant membership |
+| Auth | `app/Domain/Auth` | Credentials, OTP, social login, password reset |
+| TenantGovernance | `app/Domain/TenantGovernance` | Tenant lifecycle, profile, and subscription status |
+| Billing | `app/Domain/Billing` | Payments, subscription plans, and invoicing |
+| Sales | `app/Domain/Sales` | Orders, cart, checkout, and payment status |
+| Catalog | `app/Domain/Catalog` | Products, menu sections, modifiers, and pricing |
+| Booking | `app/Domain/Booking` | Appointments, services, providers, and availability |
+| Marketing | `app/Domain/Marketing` | Coupons, campaigns, announcements, and followers |
+| Interactions | `app/Domain/Interactions` | WhatsApp, call, and map CTA tracking |
+| Analytics | `app/Domain/Analytics` | Visit tracking and business metrics |
+| Reviews | `app/Domain/Reviews` | Customer reviews and ratings |
+| Directory | `app/Domain/Directory` | Public directory, cities, categories, and SEO |
+| Search | `app/Domain/Search` | Search contracts and query strategies |
+| AIEnrichment | `app/Domain/AIEnrichment` | AI profile optimization with budget control |
+| Public | `app/Domain/Public` | Public-facing microsites and discovery pages |
+
+## Context details
+
+<AccordionGroup>
+  <Accordion title="Identity">
+    **Owns:** `UserEntity`, `UserRole` enum, `UserRepositoryInterface`
+
+    **Responsibilities:** User registration, profile management, tenant membership assignment, and reactivation. The canonical source of truth for who a user is.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `UserRegistered` | A new user account is created |
+    | `UserDeleted` | A user account is removed |
+    | `TenantRegistered` | A new tenant is created alongside the owner user |
+    | `UserIdentityLinked` | A social provider is linked to an existing account |
+    | `UserRegisteredViaSocial` | A user registers via a social provider for the first time |
+    | `SocialIdentityLinked` | A social identity record is attached to a user |
+
+    **Application handlers:** `RegisterUserHandler`, `UpdateUserProfileHandler`, `ReactivateUserHandler`
+  </Accordion>
+
+  <Accordion title="Auth">
+    **Owns:** `OneTimePassword` entity, OTP lifecycle, social login flow, password reset, and session credentials
+
+    **Responsibilities:** Everything related to proving who you are — password verification, OTP generation and verification, social OAuth flows, and credential rotation.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `OtpGenerated` | A one-time password is created for a user |
+    | `OtpVerified` | A user successfully verifies an OTP |
+    | `UserPasswordChanged` | A user's password is reset or updated |
+
+    **Application handlers:** `Auth\Handlers` in `app/Application/Auth`
+  </Accordion>
+
+  <Accordion title="TenantGovernance">
+    **Owns:** `TenantEntity`, `TenantRepositoryInterface`, subscription state, tenant audit trail
+
+    **Responsibilities:** Creating and managing tenant workspaces, enforcing subscription-gated features, running stale tenant audits, and reconciling subscription status.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `TenantCreated` | A new tenant workspace is provisioned |
+    | `TenantUpdated` | Tenant profile settings are changed |
+    | `TenantProfileEnhanced` | AI enrichment updates the tenant profile |
+
+    **Application handlers:** `TenantGovernance` handlers in `app/Application/TenantGovernance`
+  </Accordion>
+
+  <Accordion title="Billing">
+    **Owns:** Payment entities, subscription plans, billing gateways (via `Gateways/` interfaces), and invoicing DTOs
+
+    **Responsibilities:** Receiving and recording payments, tracking subscription upgrades and expirations, processing payment webhooks, and reconciling pending payment intents.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `PaymentReceived` | A payment is successfully recorded |
+    | `PaymentFailed` | A payment attempt fails |
+    | `PaymentReported` | A manual payment is reported by the tenant |
+    | `PaymentWebhookReceived` | An external payment webhook arrives |
+    | `SubscriptionUpgraded` | A tenant's plan is upgraded |
+
+    **Application handlers:** `Payments` handlers in `app/Application/Payments`
+  </Accordion>
+
+  <Accordion title="Sales">
+    **Owns:** `OrderEntity`, `OrderRepositoryInterface`, order status machine, and cart state
+
+    **Responsibilities:** Creating and persisting orders, managing the full order lifecycle (pending → paid → shipped → cancelled), applying coupons and discounts, and tracking payment status.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `OrderCreated` | A new order is placed |
+    | `OrderCancelled` | An order is cancelled |
+    | `CartAbandoned` | A cart session expires without checkout |
+
+    **Application handlers:** `Sales` handlers in `app/Application/Sales`
+  </Accordion>
+
+  <Accordion title="Catalog">
+    **Owns:** Product contracts, catalog query interfaces, and product-change events
+
+    **Responsibilities:** Defining the catalog contract for querying products, menu sections, modifiers, and price changes. Infrastructure implementations live in `app/Infrastructure/Catalog`.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `ProductPriceChanged` | A product's price is updated |
+
+    **Application handlers:** `Products` handlers in `app/Application/Products`
+  </Accordion>
+
+  <Accordion title="Booking">
+    **Owns:** Appointment lifecycle, service definitions, provider availability, and booking confirmation
+
+    **Responsibilities:** Creating and managing appointments, enforcing availability slots, sending confirmations and reminders, and allowing public cancellation via signed URLs.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `AppointmentCancelled` | An appointment is cancelled by owner or customer |
+
+    **Application handlers:** Booking handlers in `app/Application` (booking flows)
+  </Accordion>
+
+  <Accordion title="Marketing">
+    **Owns:** `Coupon`, `Campaign`, `Announcement`, follower lists, and loyalty contracts
+
+    **Responsibilities:** Defining coupon rules (discount type, expiry, usage limits), managing email campaigns, publishing announcements, and tracking follower/lead relationships.
+
+    **Key domain events:** Marketing events are consumed by downstream contexts (analytics, notifications). The `Marketing` domain owns the enums and contracts that define valid campaign and coupon states.
+
+    **Application handlers:** `Marketing` handlers in `app/Application/Marketing`
+  </Accordion>
+
+  <Accordion title="Interactions">
+    **Owns:** `InteractionRecorded` event, interaction repository interface, and CTA-type definitions
+
+    **Responsibilities:** Recording every customer-initiated CTA: WhatsApp button taps, phone call taps, and "get directions" map taps. These events feed the analytics read model.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `InteractionRecorded` | A visitor taps a CTA on a business microsite |
+
+    **Application handlers:** `Interactions` handlers in `app/Application/Interactions`
+  </Accordion>
+
+  <Accordion title="Analytics">
+    **Owns:** `TenantAnalytic` entity, analytics repository interface, and metric definitions
+
+    **Responsibilities:** Recording tenant visit counts, aggregating interaction metrics, syncing analytics to a read model, and providing data for the business dashboard and exportable reports.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `AnalyticsSynced` | Analytics metrics are aggregated and written to the read model |
+
+    **Application handlers:** Analytics handlers in `app/Application` (analytics flows)
+  </Accordion>
+
+  <Accordion title="Reviews">
+    **Owns:** `Review` entity, review repository interface, and rating constraints
+
+    **Responsibilities:** Allowing customers to submit reviews for tenant businesses, enforcing one-review-per-customer rules, and providing the review feed for public microsites.
+
+    **Key domain events:**
+
+    | Event | When it fires |
+    |-------|---------------|
+    | `ReviewCreated` | A customer submits a new review |
+
+    **Application handlers:** `Reviews` handlers in `app/Application/Reviews`
+  </Accordion>
+
+  <Accordion title="Directory">
+    **Owns:** Directory DTOs, city/category lookup contracts, and SEO-slug resolution
+
+    **Responsibilities:** Powering the public business directory, city landing pages, and category landing pages. Provides the contracts that the Infrastructure and HTTP layers implement for discovery queries.
+
+    **Key domain events:** Directory is primarily a read-side context. It consumes events from `Identity` and `TenantGovernance` to keep directory listings current.
+  </Accordion>
+
+  <Accordion title="Search">
+    **Owns:** Search port interfaces and query strategy contracts
+
+    **Responsibilities:** Defining the contract for full-text and filtered search across the tenant directory. The Infrastructure layer (`app/Infrastructure/Search`) provides the concrete implementation (database or external search engine).
+
+    **Key domain events:** Search is a read-side context that projects from other bounded contexts.
+  </Accordion>
+
+  <Accordion title="AIEnrichment">
+    **Owns:** AI prompt templates, enrichment data DTOs, and budget-control contracts
+
+    **Responsibilities:** Generating and applying AI-suggested improvements to tenant profiles (description, SEO copy, category tagging). Every AI call is subject to a per-tenant budget cap, and all consumption is audited.
+
+    **Key domain events:** Enrichment results trigger `TenantProfileEnhanced` in the `TenantGovernance` context.
+
+    **Application handlers:** AI handlers in `app/Infrastructure/AI` and queued via `app/Application/Actions`
+  </Accordion>
+
+  <Accordion title="Public">
+    **Owns:** Public-facing microsite contracts, storefront query interfaces, and announcement delivery
+
+    **Responsibilities:** Serving the tenant microsite (`/t/{tenant}`), the public landing page, and the discovery/explore pages. Provides read-model contracts that the Infrastructure layer fulfils with cached queries.
+
+    **Key domain events:** Public is a read-side context. It reacts to `TenantUpdated` and `ProductPriceChanged` to invalidate cached microsites.
+  </Accordion>
+</AccordionGroup>
+
+## How contexts communicate
+
+Contexts are decoupled at the class level. Three patterns are used:
+
+<CardGroup cols={3}>
+  <Card title="Domain events via outbox" icon="arrow-right">
+    A handler appends a domain event to the outbox table inside its transaction. The outbox worker dispatches it after commit. Listeners in other contexts receive it asynchronously.
+  </Card>
+  <Card title="Public interfaces" icon="plug">
+    A context exposes a narrow interface (e.g., `TenantRepositoryInterface`) that other Application handlers may depend on. The concrete implementation is in Infrastructure.
+  </Card>
+  <Card title="Read models" icon="table">
+    Contexts that only need to query another context's data do so through a dedicated read-model query (e.g., a Catalog query in the Sales checkout flow), never by importing the other context's entities.
+  </Card>
+</CardGroup>

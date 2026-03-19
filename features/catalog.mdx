@@ -1,0 +1,229 @@
+---
+title: "Product Catalog"
+description: "How Vito Business OS structures products, menu sections, modifiers, media, and the public catalog API."
+---
+
+The catalog is the public-facing product inventory for each tenant. It supports a flat product list for free tenants and a rich, section-grouped menu for PRO tenants.
+
+## Product model
+
+The `Product` model (`app/Models/Product.php`) is the central catalog entity.
+
+### Key fields
+
+```php
+// app/Models/Product.php
+protected $fillable = [
+    'name', 'slug', 'description', 'price',
+    // Inventory
+    'manage_stock', 'unit_code', 'stock_quantity',
+    'low_stock_threshold', 'allow_backorders', 'stock_status',
+    // Media
+    'image_path',  // Strategy 1: column-level thumbnail
+    'blur_hash',   // LQIP placeholder (generated async)
+    // Display flags
+    'is_visible', 'is_featured', 'is_new', 'is_impulse_buy',
+    'menu_section_id', 'category_id',
+];
+
+protected $casts = [
+    'price'          => 'decimal:2',
+    'is_visible'     => 'boolean',
+    'is_featured'    => 'boolean',
+    'is_new'         => 'boolean',
+    'stock_status'   => StockStatus::class,
+    'manage_stock'   => 'boolean',
+    'allow_backorders' => 'boolean',
+];
+```
+
+### Relationships
+
+```php
+// app/Models/Product.php
+public function menuSection(): BelongsTo { ... }    // Section grouping
+public function optionGroups(): HasMany { ... }     // Variants / extras
+public function modifierGroups(): HasMany { ... }   // Customization groups
+public function images(): HasMany { ... }           // Gallery (PRO)
+public function reviews(): HasMany { ... }
+```
+
+## Dual-strategy media architecture
+
+Products use a hybrid approach to balance catalog performance against rich gallery support.
+
+<Tabs>
+  <Tab title="Strategy 1: image_path column">
+    The primary product thumbnail is stored in the `image_path` column. The `image_url` accessor returns a fully-qualified public URL using Laravel's Storage facade.
+
+    ```php
+    // app/Models/Product.php
+    public function getImageUrlAttribute(): ?string
+    {
+        if (empty($this->image_path)) {
+            return null;
+        }
+        return Storage::url($this->image_path);
+    }
+    ```
+
+    This is O(1) — no additional queries. Used on catalog grids, search results, and cart items.
+  </Tab>
+  <Tab title="Strategy 2: Spatie Medialibrary">
+    Multiple gallery images are stored via Spatie Medialibrary in the polymorphic `media` table. Two conversions are registered:
+
+    ```php
+    // app/Models/Product.php
+    public function registerMediaConversions(): void
+    {
+        $this->addMediaConversion('thumb')
+            ->width(400)->height(400)->sharpen(10);
+
+        $this->addMediaConversion('optimized')
+            ->width(800)->format('webp')->quality(80);
+    }
+    ```
+
+    Access via `$product->getMedia('gallery')` or `$product->getFirstMediaUrl('gallery', 'optimized')`. Used on the product detail page carousel.
+  </Tab>
+</Tabs>
+
+### Blurhash
+
+The `blur_hash` column stores a compact LQIP (Low Quality Image Placeholder) string generated asynchronously by the `blurhash` media job. The React frontend renders this as a colored placeholder while the real image loads.
+
+## Menu sections
+
+The `MenuSection` model groups products into named sections (e.g., "Entradas", "Platos Fuertes", "Bebidas"). Sections are ordered by `sort_order`.
+
+```php
+// app/Models/Tenant.php
+public function menuSections(): HasMany
+{
+    return $this->hasMany(MenuSection::class)->orderBy('sort_order');
+}
+```
+
+Menu sections are a PRO-only feature. `Tenant::getPublicMenuStructure()` returns `null` for non-pro tenants:
+
+```php
+// app/Models/Tenant.php
+public function getPublicMenuStructure(?int $productLimit = null): ?Collection
+{
+    if (!$this->is_pro) {
+        return null; // Falls back to flat product list
+    }
+    return $this->menuSections()
+        ->where('is_active', true)
+        ->orderBy('sort_order')
+        ->with(['activeProducts'])
+        ->get();
+}
+```
+
+## Modifier groups and options
+
+Modifier groups allow customers to customize a product at checkout (e.g., "Size: Small / Medium / Large", "Add-ons: Extra Cheese").
+
+```
+Product
+└── ModifierGroup  (e.g., "Tamaño", sorted by sort_order)
+    └── ModifierOption  (e.g., "Grande +L.20", with price adjustment)
+```
+
+Modifier groups are fetched with `$product->modifierGroups()->orderBy('sort_order')`.
+
+## Product option groups
+
+Product option groups handle variant-style selections (e.g., color, size) via the `ProductOptionGroup` and `ProductOption` models, ordered by `sort_order`.
+
+```php
+// app/Models/Product.php
+public function optionGroups(): HasMany
+{
+    return $this->hasMany(ProductOptionGroup::class)->orderBy('sort_order');
+}
+```
+
+## Impulse buy cross-selling
+
+Products flagged with `is_impulse_buy = true` appear as suggestions at checkout. The platform uses a performant ID-fetch-and-shuffle pattern to avoid `ORDER BY RAND()` at scale:
+
+```php
+// app/Models/Product.php
+public static function getRandomImpulseCandidates(
+    int $businessId,
+    array $excludeIds = [],
+    int $count = 3
+): Collection {
+    // Step 1: Fetch only IDs (lightweight)
+    $candidateIds = DB::table('products')
+        ->where('tenant_id', $businessId)
+        ->where('is_impulse_buy', true)
+        ->where('is_visible', true)
+        ->limit(self::IMPULSE_CANDIDATES_LIMIT)
+        ->pluck('id');
+
+    // Step 2: Shuffle in PHP, take subset
+    $randomIds = $candidateIds->shuffle()->take($count)->values();
+
+    // Step 3: Fetch full models with FIELD() to preserve order
+    return static::hydrate(...);
+}
+```
+
+## Business owner view vs API view
+
+<Tabs>
+  <Tab title="Business owner view">
+    The tenant panel (Filament at `/app`) provides full product management via `ProductResource`. The workspace at `/workspace/products` exposes a React CRUD interface backed by `ProductController`.
+
+    Routes available at `/workspace/products`:
+
+    ```
+    GET    /workspace/products              index
+    GET    /workspace/products/create       create form
+    POST   /workspace/products              store
+    GET    /workspace/products/{id}/edit    edit form
+    PUT    /workspace/products/{id}         update
+    DELETE /workspace/products/{id}         destroy
+    PUT    /workspace/products/{id}/toggle-visibility
+    ```
+  </Tab>
+  <Tab title="API view">
+    The public catalog endpoint is available without authentication and is cached for 600 seconds:
+
+    ```
+    GET /api/v1/products
+    ```
+
+    Middleware applied: `cacheResponse:600`
+
+    The response includes each product's `image_url` (appended accessor), `is_in_stock` (computed from `StockStatus` enum), and all fillable fields. Menu structure is included for PRO tenants.
+  </Tab>
+</Tabs>
+
+## Inventory management
+
+Products with `manage_stock = true` track stock via `stock_quantity` and `low_stock_threshold`. When stock falls below the threshold, a broadcast event notifies the tenant dashboard in real time.
+
+| Field | Type | Purpose |
+|---|---|---|
+| `manage_stock` | boolean | Enables inventory tracking |
+| `stock_quantity` | integer | Current units available |
+| `low_stock_threshold` | integer | Triggers low-stock alert |
+| `allow_backorders` | boolean | Allow orders beyond stock |
+| `stock_status` | `StockStatus` enum | `in_stock`, `out_of_stock`, `backorder` |
+
+## Auto-slug generation
+
+Slugs are auto-generated from the product name on creation if not provided:
+
+```php
+// app/Models/Product.php
+static::creating(function ($product) {
+    if (empty($product->slug)) {
+        $product->slug = Str::slug($product->name);
+    }
+});
+```

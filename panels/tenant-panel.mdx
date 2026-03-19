@@ -1,0 +1,262 @@
+---
+title: "Tenant panel"
+description: "The Filament-powered business operations panel at /app and /app/{tenant}, where business owners manage their catalog, orders, marketing, and settings."
+---
+
+The tenant panel is the primary interface for business owners. It is a [Filament 4.2](https://filamentphp.com) panel served at `/app` and `/app/{tenant}` using SPA mode, scoped entirely to the authenticated tenant's data. Each route segment that contains `{tenant}` maps to the `Tenant` model via the `slug` attribute.
+
+```
+/app                        → tenant selector / redirect
+/app/{tenant}               → dashboard
+/app/{tenant}/products      → product catalog
+/app/{tenant}/orders        → order management
+...
+```
+
+<Note>
+Registration is disabled inside the panel. New businesses complete onboarding through the public `/registrar-negocio` wizard before they can access `/app`.
+</Note>
+
+## Access and authentication
+
+| Attribute | Value |
+|---|---|
+| Panel ID | `app` |
+| Path | `/app` |
+| Auth guard | `web` |
+| Required role | `panel_user` (business owner) |
+| Tenant model | `App\Models\Tenant` (resolved by `slug`) |
+
+Access is controlled by `AppPanelProvider`. The panel registers the `Tenant` model for multi-tenancy and resolves the current tenant from the URL slug on every request:
+
+```php
+// app/Providers/Filament/AppPanelProvider.php
+->id('app')
+->path('app')
+->tenant(\App\Models\Tenant::class, slugAttribute: 'slug')
+->tenantProfile(\App\Filament\App\Pages\EditTenantProfile::class)
+```
+
+## Tenant isolation
+
+All resources inside the app panel are scoped to the authenticated tenant. Each resource restricts its Eloquent query to the current tenant's ID. For example, `OrderResource` uses `modifyQueryUsing` to filter results:
+
+```php
+// app/Filament/App/Resources/OrderResource.php
+->modifyQueryUsing(function (Builder $query): Builder {
+    $tenant = static::getTenantRecord();
+
+    if (! $tenant instanceof Tenant) {
+        return $query->whereRaw('1 = 0');
+    }
+
+    return $query
+        ->where('tenant_id', (string) $tenant->getKey())
+        ->with('location')
+        ->latest();
+})
+```
+
+Inline resource creation (e.g., creating a menu section while editing a product) also injects the current `tenant_id` automatically via a hidden field:
+
+```php
+// app/Filament/App/Resources/ProductResource.php
+Forms\Components\Hidden::make('tenant_id')
+    ->default(fn (): int|string|null => static::currentTenantId()),
+```
+
+## Dashboard widgets
+
+The tenant dashboard renders a prioritised widget stack sourced from `app/Filament/App/Widgets/`:
+
+| Widget | Purpose |
+|---|---|
+| `TenantStatsWidget` | Bento grid with growth KPIs (followers, orders, revenue, appointments) |
+| `RevenueChart` | 30-day revenue trend line chart |
+| `OrdersChart` | 7-day appointment and order volume |
+| `ProductLimitWidget` | Progress bar showing products used vs. plan limit |
+| `AccountCompletenessWidget` | Profile completion score with actionable nudges |
+| `QuickActionsWidget` | Shortcut buttons for most common actions |
+| `ProductLimitWarning` | Alert banner when approaching the free plan product ceiling |
+| `PendingReviewAlert` | Alert for unreviewed customer reviews |
+| `FreePlanUpsellWidget` | Upgrade prompt for tenants on the free plan |
+
+## Navigation groups
+
+The sidebar is organised into three deterministic groups defined in `AppPanelProvider`:
+
+<AccordionGroup>
+  <Accordion title="Mi Negocio">
+    Operational resources that run day-to-day business. Includes orders, appointments, and the public site link.
+
+    - **Pedidos** — `OrderResource`: incoming orders with status pipeline (Pending → Confirmed → In Kitchen → Ready → Delivered)
+    - **Agenda de Citas** — `AppointmentResource`: appointment calendar with service and provider assignment
+    - **Seguidores** — `FollowerResource`: read-only list of users who follow the business
+    - **Leads** — `LeadResource`: captured leads from public forms
+    - **Ver mi Sitio Público** — external link to the public microsite
+    - **Compartir Negocio** — WhatsApp share link
+  </Accordion>
+
+  <Accordion title="Catálogo">
+    Resources for building and managing the product catalog.
+
+    - **Mis Productos** — `ProductResource`: create and manage products with image editor, pricing, variants (PRO), and menu section assignment
+    - **Secciones del Menú** — `MenuSectionResource`: drag-and-drop sortable sections for organising the catalog
+    - **Servicios** — `ServiceResource`: bookable services with duration and price
+    - **Proveedores de Servicio** — `ServiceProviderResource`: staff or contractors who deliver services
+    - **Reseñas** — `ReviewResource`: customer reviews left on the public site
+    - **Inventario** — `InventoryLevelResource` / `InventoryMovementResource`: stock levels and movement history
+    - **Sucursales** — `LocationResource`: branch/location management
+  </Accordion>
+
+  <Accordion title="Marketing">
+    Growth and retention tools, some gated to the PRO plan.
+
+    - **Anuncios** — `AnnouncementResource`: scheduled banners shown on the public microsite
+    - **Cupones** — `CouponResource`: percentage or fixed discount codes with usage limits and expiry
+    - **Campanas (PRO)** — `CampaignResource`: bulk email campaigns with audience segmentation
+    - **Loyalty → Configuracion** — `LoyaltyProgramResource`: define earn ratio and redemption rules
+    - **Loyalty → Recompensas** — `LoyaltyRewardResource`: rewards that customers can redeem with points
+  </Accordion>
+
+  <Accordion title="Configuracion">
+    Account and tenant management pages.
+
+    - **Mi Negocio** — `TenantProfileResource`: edit the public profile (name, logo, brand colour, social links, checkout options)
+    - **Equipo** — `TenantUserResource`: add team members and assign roles (Owner, Admin, Manager, Operator, Viewer)
+    - **Suscripción** — `ManageBilling` page: subscription state machine (Free → Pending → PRO) with payment wizard and receipt download
+    - **Marketing** — `ManageMarketing` page: marketing settings
+    - **Configuración** — `Settings` page: WhatsApp number, address, and message template
+    - **Upgrade a PRO** — `UpgradeToPro` page: plan comparison and upgrade CTA
+  </Accordion>
+</AccordionGroup>
+
+## Resources reference
+
+<CardGroup cols={2}>
+  <Card title="ProductResource" icon="shopping-bag">
+    Manages products with a mobile-first form. Enforces the free plan product limit via `canCreate()`. Supports inline image editing at 1:1 aspect ratio, menu section assignment (PRO), featured products (PRO), and product variants (PRO). Includes a duplicate action and inline price editing directly from the table.
+  </Card>
+  <Card title="OrderResource" icon="clipboard-document-list">
+    Read-only order view with a status pipeline driven by `OrderStateService`. Actions (Confirm, A cocina, Listo, Entregar) transition state and fire a broadcast event. Displays a navigation badge showing the count of pending orders.
+  </Card>
+  <Card title="AppointmentResource" icon="calendar-days">
+    Full appointment lifecycle: book, confirm, cancel, and mark as completed. Integrates with `ServiceResource` and `ServiceProviderResource`. Supports an embedded calendar widget.
+  </Card>
+  <Card title="CouponResource" icon="ticket">
+    Creates discount codes with type (percentage or fixed), minimum purchase, usage cap, and expiry. Scoped to the current tenant. Active status is toggled inline from the table.
+  </Card>
+  <Card title="TenantUserResource" icon="user-group">
+    Manages `TenantMembership` records. Supports inline user creation with a temporary password. Roles (Owner, Admin, Manager, Operator, Viewer) map to RBAC presets in `config/rbac.php`.
+  </Card>
+  <Card title="LoyaltyProgramResource" icon="currency-dollar">
+    Configures the earn ratio (spend to points) and redemption threshold. One program per tenant. `LoyaltyRewardResource` defines the rewards catalogue that customers can claim.
+  </Card>
+  <Card title="AnnouncementResource" icon="megaphone">
+    Scheduled banners with rich text content (no images), type-based colour coding, and activation toggle. Displayed on the tenant's public microsite during the configured date window.
+  </Card>
+  <Card title="CampaignResource" icon="megaphone">
+    PRO-only bulk email campaigns with audience type segmentation (all followers, segment). Campaign emails are dispatched via a queued job.
+  </Card>
+</CardGroup>
+
+## Plan gating
+
+Plan-gated features use `Capability` enum checks resolved from the tenant record. Resources silently disable or hide form fields for tenants without the required capability:
+
+```php
+// app/Filament/App/Resources/ProductResource.php
+Forms\Components\Select::make('menu_section_id')
+    ->visible(fn (): bool => static::currentTenantHasCapability(Capability::MENU_MODIFIERS))
+```
+
+When a PRO feature is locked, a "velvet rope" placeholder renders a disabled field with an upgrade link pointing to the `ManageBilling` page:
+
+```php
+Forms\Components\Select::make('menu_section_id_locked')
+    ->visible(fn (): bool => ! static::currentTenantHasCapability(Capability::MENU_MODIFIERS))
+    ->disabled()
+    ->dehydrated(false)
+    ->label('🔒 Sección del Menú')
+    ->helperText(new \Illuminate\Support\HtmlString(
+        '... <a href="'.route('filament.app.pages.manage-billing', ...).'">→ Desbloquear con PRO</a>'
+    ))
+```
+
+The `canCreate()` method on `ProductResource` enforces the free plan product ceiling by counting existing products and comparing against the `free_plan_product_limit` setting from `GeneralSettings`:
+
+```php
+// app/Filament/App/Resources/ProductResource.php
+public static function canCreate(): bool
+{
+    if (! Gate::allows('create', Product::class)) {
+        return false;
+    }
+
+    $tenant = static::getCurrentTenant();
+
+    if ($tenant->is_pro) {
+        return true;
+    }
+
+    $settings = app(GeneralSettings::class);
+    $limit = $settings->free_plan_product_limit ?? 10;
+
+    $currentCount = DB::table('products')
+        ->where('tenant_id', $tenant->id)
+        ->whereNull('deleted_at')
+        ->count();
+
+    return $currentCount < $limit;
+}
+```
+
+## Billing page — state machine
+
+`ManageBilling` is a custom Filament page that renders a different UI based on three subscription states:
+
+<Tabs>
+  <Tab title="FREE">
+    Shows a multi-step payment wizard (Filament `Wizard`). Step 1 displays bank transfer instructions populated from `GeneralSettings::bank_transfer_instructions`. Step 2 collects the reference number and a proof-of-payment image upload.
+  </Tab>
+  <Tab title="PENDING">
+    Renders a waiting screen after a `SubscriptionPayment` record is created with `status = pending`. The tenant cannot submit another payment while one is pending.
+  </Tab>
+  <Tab title="PRO">
+    Shows a payment history table (`SubscriptionPayment` records scoped to the tenant) with a downloadable PDF receipt action powered by `barryvdh/laravel-dompdf`.
+  </Tab>
+</Tabs>
+
+## Settings page
+
+`Settings` is a simple Filament page (`app/Filament/App/Pages/Settings.php`) that saves tenant fields directly. It exposes:
+
+- Business name
+- WhatsApp number
+- Address
+- WhatsApp message template (with variables: `{business_name}`, `{product_name}`, `{product_price}`)
+
+Access is guarded by `TenantPermissionGuardInterface` requiring the `SETTINGS_VIEW` permission.
+
+## SPA mode and notifications
+
+The panel runs in SPA mode (powered by Livewire wire navigation) to eliminate full page reloads between views:
+
+```php
+// app/Providers/Filament/AppPanelProvider.php
+->spa()
+->databaseNotifications()
+->databaseNotificationsPolling('60s')
+```
+
+Database notifications are polled every 60 seconds. In-panel notifications are delivered via `Filament\Notifications\Notification::make()` and appear as toast messages.
+
+## Visual design
+
+| Attribute | Value |
+|---|---|
+| Primary colour | Indigo (`Color::Indigo`) |
+| Gray scale | Zinc (`Color::Zinc`) |
+| Font | Inter (Google Fonts, mobile-optimised) |
+| Dark mode | Enabled |
+| Sidebar | Collapsible and fully collapsible on desktop |

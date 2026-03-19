@@ -1,0 +1,247 @@
+---
+title: "Security"
+description: "Rate limiting, idempotency, signed URLs, RBAC, tenant isolation, impersonation audit trail, webhook verification, and input validation in Vito Business OS."
+---
+
+## Rate Limiting
+
+All named rate limiters are registered in `app/Providers/InfrastructureServiceProvider.php` and `app/Providers/AppServiceProvider.php`. They are applied per route group via Laravel's `throttle` middleware.
+
+| Limiter Name | Limit | Keyed By | Applied To |
+|---|---|---|---|
+| `api` | 60 req/min | user ID or IP | All API routes |
+| `login` | 5 req/min | email + IP | Login endpoint |
+| `otp-request` | 3 req/min | IP | OTP generation (SMS bombing prevention) |
+| `otp-verify` | 5 req/min | user ID or IP | OTP verification |
+| `registration` | 3 req/hour | IP | New account registration |
+| `api.otp-generation` | 3 req/min | IP | API OTP generation |
+| `api.verification` | 10 req/min | user ID or IP | Coupon validation, identity checks |
+| `api.transactions` | 20 req/min | user ID or IP | Order creation, payment submission |
+| `tenant-aware` | 120 req/min | tenant ID + IP | Public storefront and analytics endpoints |
+| `search` | 30 req/min | IP | Global search |
+| `uploads` | 10 req/min | user ID or IP | File upload endpoints |
+| `notifications` | 30 req/min | user ID or IP | Notification polling |
+
+Nginx enforces an additional network-level rate limit before requests reach PHP:
+
+```nginx
+# 60 requests/minute to API routes
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=60r/m;
+
+# 10 requests/minute to login/register/password routes
+limit_req_zone $binary_remote_addr zone=login_limit:10m rate=10r/m;
+```
+
+### Tenant-Aware Rate Limiting
+
+The `tenant-aware` limiter uses a composite key of `tenant_id` + IP to prevent botnet attacks targeting a specific tenant's storefront:
+
+```php
+RateLimiter::for('tenant-aware', function (Request $request) {
+    $context = app(\App\Domain\Shared\Contracts\TenantContext::class);
+    try {
+        $tenantId = (string) $context->getTenantId();
+    } catch (\RuntimeException) {
+        $tenantId = (string) $request->input('tenant_id', '');
+    }
+
+    $key = $tenantId
+        ? "tenant_id:{$tenantId}|ip:" . $request->ip()
+        : 'ip:' . $request->ip();
+
+    return Limit::perMinute(120)->by($key);
+});
+```
+
+## Idempotency
+
+Write operations that must not be executed more than once — OTP generation, payment submissions, order creation — are protected by idempotency middleware. Clients send an `Idempotency-Key` header; the server records each key and replays the original response on duplicate requests instead of re-executing the handler.
+
+Key components:
+
+- `app/Http/Middleware/EnsureIdempotencyKey.php` — enforces the header is present on write routes
+- `app/Http/Middleware/SmartIdempotencyMiddleware.php` — checks for a prior result and short-circuits
+- `app/Infrastructure/Common/Idempotency/AtomicIdempotencyService.php` — stores keys atomically in Redis
+- `app/Infrastructure/Common/Idempotency/RedisIdempotencyService.php` — Redis-backed implementation
+
+Idempotency keys are pruned daily at 03:30 by the `auth:prune-idempotency --days=30 --chunk=1000` scheduled task.
+
+## Signed URLs
+
+Signed URLs prevent unauthorized access to resources that must be shared with unauthenticated users. The following routes require a valid Laravel signature:
+
+| Route | Purpose |
+|---|---|
+| Guest appointment management | Allows customers to confirm, reschedule, or cancel appointments without logging in |
+| Report / export downloads | Lets users download generated PDFs and exports from notification emails |
+| Email verification | Standard Laravel email verification link |
+
+Example — appointment management route in `routes/public.php` uses `->middleware('signed')`:
+
+```php
+Route::get('/appointments/{appointment}/manage', ...)
+    ->middleware('signed');
+```
+
+<Warning>
+Never expose raw file paths or S3 keys in URLs. Always generate signed URLs server-side with a short expiry. For media uploads, use pre-signed S3 upload URLs so files go directly to S3 without passing through the application server.
+</Warning>
+
+## RBAC — Roles and Permissions
+
+Vito Business OS uses [Spatie Laravel Permission](https://spatie.be/docs/laravel-permission) for fine-grained RBAC. Roles are seeded by `database/seeders/RolesAndPermissionsSeeder.php`.
+
+### Roles
+
+| Role | Access Level | Capabilities |
+|---|---|---|
+| `super_admin` | Full control | All permissions across all resources |
+| `ventas` | Read-only tenants | View tenants, categories, cities — no deletes, no settings |
+| `soporte` | Retention ops | View + edit tenants, impersonate users — no payment data or financial widgets |
+| `auditor` | Read everything | View tenants, payments, users, activity logs, financial widgets — no writes |
+| `panel_user` | Tenant panel | Business owners managing their own tenant — access controlled by policies and tenant scoping |
+
+### Seed Roles
+
+```bash
+php artisan db:seed --class=RolesAndPermissionsSeeder
+```
+
+### Permission Structure
+
+Permissions follow the `{action}_{resource}` convention. Example resource permissions:
+
+```
+view_any_tenant  view_tenant  create_tenant  update_tenant  delete_tenant
+view_any_payment  view_payment  approve_payment  reject_payment
+view_any_user  impersonate_user
+financial_stats_widget  pending_payments_widget
+```
+
+The `super_admin` role receives `Permission::all()` at seed time and is automatically synchronized whenever the seeder runs.
+
+## Tenant Ownership Middleware
+
+The `tenant.ownership` middleware (`app/Http/Middleware/EnsureTenantOwnership.php`) is a perimeter guard applied to all tenant-scoped resource routes:
+
+```php
+Route::middleware(['auth:sanctum', 'tenant.ownership', 'throttle:api'])->group(function () {
+    Route::resource('products', ProductController::class);
+    // ...
+});
+```
+
+For every route-model-bound parameter with a `tenant_id` column, the middleware verifies the model belongs to the authenticated user's tenant. **On violation, it returns HTTP `404` — not `403`** — to avoid disclosing whether the resource exists:
+
+```php
+// Returns 404 to prevent information disclosure
+// (Don't reveal if resource exists but is denied)
+abort(404);
+```
+
+All violations are logged to the `security` log channel with event type `TENANT_OWNERSHIP_VIOLATION` and severity `HIGH`, including user ID, IP address, user agent, route name, and the model type and ID that was accessed.
+
+## Impersonation Audit Trail
+
+Super admins can impersonate tenant users via the Filament admin panel. Every impersonation session leaves a forensic audit trail managed by `app/Http/Controllers/Auth/ImpersonationController.php`:
+
+1. **Pre-condition check** — Logs a warning if `leave` is called without an active `impersonator_id` session key.
+2. **Audit log on exit** — Emits an `impersonation_ended` log event containing `original_admin_id`, `impersonated_user_id`, IP address, user agent, and timestamp.
+3. **Session rotation** — Calls `$request->session()->regenerate()` after restoring the admin session to prevent session fixation attacks.
+4. **Fallback safety** — If the original admin account cannot be found, the session is fully invalidated and the user is redirected to `/login`.
+
+```php
+// Forensic Audit Log (from ImpersonationController)
+$this->logger->info('impersonation_ended', [
+    'original_admin_id'    => $impersonatorId,
+    'impersonated_user_id' => $impersonatedUserId,
+    'ip_address'           => $request->ip(),
+    'user_agent'           => $request->userAgent(),
+    'timestamp'            => now()->toIso8601String(),
+]);
+```
+
+## Payment Webhook Verification
+
+Incoming payment webhooks are verified using a shared secret before any processing occurs. The secret is injected into `PaymentWebhookController` via the service container, not read directly from `config()`:
+
+```php
+// AppServiceProvider — contextual binding
+$this->app->when(PaymentWebhookController::class)
+    ->needs('$webhookSecret')
+    ->give(function () {
+        $secret = config('services.payment.webhook_secret');
+        if (!is_string($secret) || empty($secret)) {
+            throw new \RuntimeException('Webhook secret is not configured.');
+        }
+        return $secret;
+    });
+```
+
+Set the secret in `.env`:
+
+```env
+PAYMENT_WEBHOOK_SECRET=whsec_your_production_secret
+```
+
+<Warning>
+Do not commit a real `PAYMENT_WEBHOOK_SECRET` to version control. The `.env.example` ships with `whsec_dummy_secret_for_local_dev_only` — replace it before processing live webhooks.
+</Warning>
+
+## Input Validation
+
+All write operations are validated using Laravel `FormRequest` classes before reaching the controller or command handler. The `CommandValidatorRegistry` (registered in `AppServiceProvider`) maps commands to their validators:
+
+- `RegisterUserCommand` → `RegisterUserValidator`
+- `DeleteUserCommand` → `DeleteUserCommandValidator`
+- `VerifyOtpCommand` → `VerifyOtpCommandValidator`
+- `ReportPaymentCommand` → `ReportPaymentCommandValidator`
+- `RequestUpgradeCommand` → `RequestUpgradeCommandValidator`
+
+Contributors must add a `FormRequest` or command validator for any new write route. Do not bypass validation by accepting raw `$request->all()` input in controllers.
+
+## Security Response Headers
+
+HTTP security headers are applied by `app/Http/Middleware/SecurityHeaders` and supplemented by Nginx:
+
+| Header | Value |
+|---|---|
+| `X-Frame-Options` | `SAMEORIGIN` |
+| `X-Content-Type-Options` | `nosniff` |
+| `X-XSS-Protection` | `1; mode=block` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` |
+
+HSTS (`Strict-Transport-Security`) is present in `nginx_app.conf` but commented out. Enable it after confirming SSL is working correctly:
+
+```nginx
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+```
+
+## Pre-Signed S3 Uploads
+
+Media uploads use **pre-signed S3 URLs** generated server-side. The client uploads directly to S3 without the file passing through the application server. This means:
+
+- The web worker is never blocked on large binary transfers.
+- S3 access credentials are never exposed to the client.
+- Upload size limits are enforced by the S3 pre-signed URL policy, not Nginx.
+
+## Security Artisan Commands
+
+| Command | Signature | Purpose |
+|---|---|---|
+| `security:attack-otp` | `security:attack-otp {identifier} {tenantId} {code}` | Simulates an OTP brute-force attack. Used in automated tests to verify the `MaxOtpAttemptsExceededException` lockout is triggered correctly. |
+| `auth:clear-otps` | `auth:clear-otps` | Deletes expired OTP records older than 1 hour. Useful for clearing test data or responding to an OTP-related incident. |
+
+## Production Security Checklist
+
+- [ ] `APP_DEBUG=false` and `APP_ENV=production` in `.env`
+- [ ] `PAYMENT_WEBHOOK_SECRET` set to a real secret
+- [ ] Database credentials are unique and strong
+- [ ] Redis password set if exposed beyond localhost
+- [ ] SSL certificate installed and HSTS header enabled
+- [ ] Firewall allows only ports 80, 443, and 22
+- [ ] SSH uses key-based authentication (password auth disabled)
+- [ ] `.env` file permissions: `chmod 640 .env`
+- [ ] `storage/` and `bootstrap/cache/` owned by `www-data`
+- [ ] Unattended security upgrades enabled: `sudo dpkg-reconfigure unattended-upgrades`

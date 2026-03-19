@@ -1,0 +1,219 @@
+---
+title: "Roles and permissions"
+description: "Role-based access control using Spatie Permission, tenant ownership isolation, and admin impersonation."
+---
+
+Vito uses two overlapping role systems:
+
+1. **System roles** (`UserRole` enum) — stored in the `users.role` column. Controls access to the Filament admin panel and super-admin features.
+2. **Tenant roles** (`Role` enum + Spatie Permission) — scoped to a tenant membership. Controls what actions a staff member can perform within a business.
+
+## System roles
+
+Defined in `App\Domain\Identity\Enums\UserRole`:
+
+| Enum value | DB value | Description |
+|------------|----------|-------------|
+| `SUPER_ADMIN` | `super_admin` | Full platform access, bypasses all tenant checks |
+| `TENANT_OWNER` | `seller` | Owner of one or more tenants (legacy DB value) |
+| `STAFF` | `staff` | Employee member of a tenant |
+| `CUSTOMER` | `user` | End consumer (legacy DB value) |
+
+<Note>
+The `super_admin` role can also be granted by listing an email in the `APP_SUPER_ADMINS` environment variable (comma-separated). This takes precedence over the database role column.
+
+```php
+// User::isSuperAdmin()
+$adminEmail = config('auth.super_admin_email');
+if ($adminEmail && strcasecmp($this->email, $adminEmail) === 0) {
+    return true;
+}
+return $this->role->value === UserRole::SUPER_ADMIN->value;
+```
+</Note>
+
+## Tenant roles and permissions
+
+Tenant-scoped roles are managed by [Spatie Laravel Permission](https://spatie.be/docs/laravel-permission) and defined in `App\Domain\Access\Enums\Role`:
+
+| Role | Value | Typical use |
+|------|-------|-------------|
+| `OWNER` | `owner` | Full control of the tenant, all permissions |
+| `ADMIN` | `admin` | Manage catalog, orders, staff, analytics |
+| `MANAGER` | `manager` | Manage catalog, orders, and fulfillment |
+| `OPERATOR` | `operator` | View catalog and orders, fulfill orders |
+| `VIEWER` | `viewer` | Read-only access across most resources |
+
+### Permission list
+
+Permissions are defined in `App\Domain\Access\Enums\Permission` and assigned to roles in `config/rbac.php`:
+
+```php
+// config/rbac.php — example for the 'admin' role
+Role::ADMIN->value => [
+    Permission::TENANT_VIEW->value,
+    Permission::TENANT_UPDATE->value,
+    Permission::CATALOG_VIEW->value,
+    Permission::CATALOG_CREATE->value,
+    // ...
+    Permission::AI_USE->value,
+],
+```
+
+<AccordionGroup>
+  <Accordion title="Full permission list">
+
+| Permission | Value | Description |
+|------------|-------|-------------|
+| `TENANT_VIEW` | `tenant.view` | View tenant profile |
+| `TENANT_UPDATE` | `tenant.update` | Update tenant profile |
+| `SETTINGS_VIEW` | `settings.view` | View settings |
+| `SETTINGS_UPDATE` | `settings.update` | Update settings |
+| `BILLING_VIEW` | `billing.view` | View billing information |
+| `BILLING_MANAGE` | `billing.manage` | Manage billing and subscriptions |
+| `CATALOG_VIEW` | `catalog.view` | View products |
+| `CATALOG_CREATE` | `catalog.create` | Create products |
+| `CATALOG_UPDATE` | `catalog.update` | Update products |
+| `CATALOG_DELETE` | `catalog.delete` | Delete products |
+| `CATALOG_PUBLISH` | `catalog.publish` | Publish / unpublish products |
+| `MENU_VIEW` | `menu.view` | View menu sections |
+| `MENU_MANAGE` | `menu.manage` | Manage menu sections |
+| `INVENTORY_VIEW` | `inventory.view` | View stock levels |
+| `INVENTORY_ADJUST` | `inventory.adjust` | Adjust stock quantities |
+| `INVENTORY_TRANSFER` | `inventory.transfer` | Transfer stock between locations |
+| `ORDERS_VIEW` | `orders.view` | View orders |
+| `ORDERS_CREATE` | `orders.create` | Create orders |
+| `ORDERS_MANAGE` | `orders.manage` | Update order metadata |
+| `ORDERS_FULFILL` | `orders.fulfill` | Mark orders as fulfilled |
+| `ORDERS_CANCEL` | `orders.cancel` | Cancel orders |
+| `ORDERS_EXPORT` | `orders.export` | Export orders to file |
+| `PAYMENTS_VIEW` | `payments.view` | View payment records |
+| `PAYMENTS_RECORD` | `payments.record` | Record a payment |
+| `CUSTOMERS_VIEW` | `customers.view` | View customer list |
+| `CUSTOMERS_EXPORT` | `customers.export` | Export customer data |
+| `APPOINTMENTS_VIEW` | `appointments.view` | View appointments |
+| `APPOINTMENTS_MANAGE` | `appointments.manage` | Create and update appointments |
+| `STAFF_VIEW` | `staff.view` | View staff list |
+| `STAFF_MANAGE` | `staff.manage` | Invite and manage staff |
+| `STAFF_ASSIGN_ROLES` | `staff.assign_roles` | Assign roles to staff |
+| `MARKETING_VIEW` | `marketing.view` | View campaigns and leads |
+| `MARKETING_MANAGE` | `marketing.manage` | Create and manage campaigns |
+| `ANALYTICS_VIEW` | `analytics.view` | View analytics dashboards |
+| `ANALYTICS_EXPORT` | `analytics.export` | Export analytics data |
+| `INTEGRATIONS_VIEW` | `integrations.view` | View integrations |
+| `INTEGRATIONS_MANAGE` | `integrations.manage` | Configure integrations |
+| `WEBHOOKS_VIEW` | `webhooks.view` | View webhook configurations |
+| `WEBHOOKS_MANAGE` | `webhooks.manage` | Manage webhook configurations |
+| `AI_USE` | `ai.use` | Access AI generation tools |
+
+  </Accordion>
+</AccordionGroup>
+
+### Role presets
+
+`config/rbac.php` defines presets for common staff roles tied to a plan capability:
+
+| Preset | Base role | Key permissions | Requires capability |
+|--------|-----------|-----------------|--------------------|
+| `cashier` | `operator` | `orders.view`, `orders.manage`, `payments.record` | `checkout_basic` |
+| `kitchen_staff` | `operator` | `orders.view`, `orders.fulfill` | `kitchen_display` |
+| `service_provider` | `operator` | `appointments.view`, `appointments.manage` | `appointment_booking` |
+| `warehouse_clerk` | `operator` | `inventory.view`, `inventory.adjust`, `inventory.transfer` | `inventory_tracking` |
+
+## Checking permissions in code
+
+### In PHP (Spatie)
+
+```php
+// Check a permission
+$user->can('orders.view');
+
+// Check a role
+$user->hasRole('admin');
+
+// Assign a role to a user
+$user->assignRole('manager');
+
+// Give a direct permission
+$user->givePermissionTo('catalog.publish');
+```
+
+### Checking system role
+
+```php
+// Check super admin (email whitelist OR role column)
+$user->isSuperAdmin();
+
+// Check tenant ownership (membership or owner column)
+$user->isTenantOwner();
+```
+
+### In Filament resources
+
+Filament resources respect Laravel's Gate. Use `canAccess` or `canViewAny` methods that delegate to the registered `Policy`:
+
+```php
+// ActivityLogResource — only super_admin and auditor
+public static function canAccess(): bool
+{
+    $user = auth()->user();
+    return $user->isSuperAdmin() || $rawRole === 'auditor';
+}
+```
+
+## Tenant ownership middleware
+
+The `tenant.ownership` middleware (`EnsureTenantOwnership`) is applied to all protected tenant API routes:
+
+```php
+Route::middleware(['auth:sanctum', 'tenant.ownership', 'throttle:api'])->group(function () {
+    Route::prefix('orders')->group(function () { ... });
+    Route::prefix('settings')->group(function () { ... });
+    Route::prefix('reports')->group(function () { ... });
+});
+```
+
+For every route-model-bound parameter, the middleware verifies that the model's `tenant_id` belongs to one of the authenticated user's tenants. On a mismatch:
+
+1. A `TENANT_OWNERSHIP_VIOLATION` event is logged to the `security` log channel.
+2. The request is aborted with `404` (not `403`) to avoid disclosing resource existence.
+
+Models covered: `Product`, `Order`, `Coupon`, `MenuSection`, `Lead`, `Campaign`.
+
+## Impersonation
+
+Super-admins can impersonate tenant users directly from the Filament admin panel. The original admin session is preserved in `impersonator_id` and `impersonator_name` session keys.
+
+### Leaving impersonation
+
+```
+GET /impersonate/leave
+```
+
+The `ImpersonationController::leave` method:
+
+1. Verifies that an active impersonation session exists (`impersonator_id` in session).
+2. Logs the `impersonation_ended` event with the original admin ID, impersonated user ID, IP, and user agent.
+3. Clears the impersonation session keys.
+4. Logs out the impersonated user and restores the original admin session.
+5. Regenerates the session ID to prevent session fixation.
+
+```php
+$this->logger->info('impersonation_ended', [
+    'original_admin_id'   => $impersonatorId,
+    'impersonated_user_id' => $impersonatedUserId,
+    'ip_address'          => $request->ip(),
+    'user_agent'          => $request->userAgent(),
+    'timestamp'           => now()->toIso8601String(),
+]);
+
+$request->session()->forget(['impersonator_id', 'impersonator_name', 'password_hash_check']);
+$this->auth->logout();
+$admin = User::query()->find($impersonatorId);
+$this->auth->login($admin);
+$request->session()->regenerate();
+```
+
+<Warning>
+If the original admin account cannot be found after impersonation ends (e.g., it was deleted), the session is fully invalidated and the browser is redirected to `/login`. This failure is logged at `emergency` severity.
+</Warning>

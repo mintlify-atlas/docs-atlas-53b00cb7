@@ -1,0 +1,217 @@
+---
+title: "Multi-Tenancy"
+description: "How Vito Business OS isolates each business into its own tenant with path-based or subdomain routing, data scoping, and plan-gated capabilities."
+---
+
+Vito Business OS is a multi-tenant platform where each business (called a **Tenant**) operates in a fully isolated environment. A single Laravel application serves all tenants — their data, routing, and capabilities are separated by the platform.
+
+## How routing works
+
+Tenants are identified by their `slug` field. The routing strategy differs between environments.
+
+<Note>
+In **local development**, the microsite uses a path-based fallback at `/t/{tenant:slug}`. In **production**, you configure subdomain routing (e.g., `{tenant}.yourdomain.com`) via `config/tenancy.php` and Nginx. The path-based routes are always registered as a fallback for compatibility.
+</Note>
+
+```php
+// routes/web.php — path-based fallback (always active)
+Route::get('/t/{tenant:slug}', [TenantMicrositeController::class, 'show']);
+Route::get('/t/{tenant:slug}/book', [BookingController::class, 'index']);
+```
+
+### Public tenant surfaces
+
+| Route | Purpose |
+|---|---|
+| `/t/{tenant}` | Public microsite (catalog, SEO, checkout) |
+| `/t/{tenant}/book` | Public booking and appointment page |
+| `/appointments/{appointment}/manage` | Signed URL portal for appointment self-management |
+| `/registrar-negocio` | Public business registration form |
+
+## The Tenant model
+
+The `Tenant` model (`app/Models/Tenant.php`) is the central entity of the platform. It owns all business data and drives plan-gated capabilities.
+
+### Core attributes
+
+```php
+// app/Models/Tenant.php
+protected $fillable = [
+    'name', 'slug', 'description', 'address',
+    'city_id', 'category_id',
+    'whatsapp_number', 'whatsapp_message', 'phone', 'email',
+    'website_url', 'facebook_url', 'instagram_url', 'tiktok_url',
+    'brand_color', 'slogan', 'seo_title', 'seo_description',
+    'tags', 'payment_methods',
+    'delivery_enabled', 'pickup_enabled', 'minimum_order',
+    'business_type',
+    // Premium profile fields (PRO)
+    'about', 'hero_image', 'latitude', 'longitude', 'cover_path',
+];
+```
+
+### What a Tenant owns
+
+<CardGroup cols={2}>
+  <Card title="Catalog" icon="tag">
+    Products, menu sections, modifier groups, product option groups, and gallery images.
+  </Card>
+  <Card title="Sales" icon="shopping-cart">
+    Orders, order items, order events, payments, and subscription payments.
+  </Card>
+  <Card title="Bookings" icon="calendar">
+    Services, service providers, appointments, and opening hours.
+  </Card>
+  <Card title="Marketing" icon="megaphone">
+    Coupons, campaigns, announcements, leads, and follower relationships.
+  </Card>
+  <Card title="Loyalty" icon="star">
+    Loyalty program configuration, rewards catalog, and ledger entries.
+  </Card>
+  <Card title="Analytics" icon="chart-bar">
+    Tenant visits, aggregated daily analytics, and interaction tracking.
+  </Card>
+</CardGroup>
+
+### Relationships defined on `Tenant`
+
+```php
+// app/Models/Tenant.php
+public function products(): HasMany { ... }
+public function menuSections(): HasMany { ... }
+public function payments(): HasMany { ... }
+public function leads(): HasMany { ... }
+public function reviews(): HasMany { ... }
+public function tenantVisits(): HasMany { ... }
+public function campaigns(): HasMany { ... }
+public function coupons(): HasMany { ... }
+public function openingHours(): HasMany { ... }
+public function services(): HasMany { ... }
+public function serviceProviders(): HasMany { ... }
+public function appointments(): HasMany { ... }
+public function followers() { ... } // BelongsToMany User via 'follows'
+```
+
+## Tenant isolation
+
+Data isolation is enforced at two layers.
+
+### BelongsToTenant trait
+
+All tenant-owned models use the `BelongsToTenant` trait (`app/Infrastructure/Persistence/Eloquent/Traits/BelongsToTenant.php`). It automatically scopes every Eloquent query to the current authenticated tenant and sets `tenant_id` on creation.
+
+```php
+// Example: Product is always scoped to the current tenant
+class Product extends Model
+{
+    use BelongsToTenant; // All queries: WHERE tenant_id = ?
+
+    protected $guarded = [
+        'id',
+        'tenant_id', // IMMUTABLE OWNERSHIP
+    ];
+}
+```
+
+### Route-level middleware
+
+API routes protected by `tenant.ownership` middleware verify the authenticated user's tenant matches the requested resource before any controller logic executes.
+
+```php
+// config reference: API routes use auth:sanctum + tenant.ownership
+// routes/api.php
+Route::middleware(['auth:sanctum', 'tenant.ownership'])->group(function () {
+    Route::get('/products', ...);
+    Route::apiResource('/orders', ...);
+});
+```
+
+## Tenant creation flow
+
+<Steps>
+  <Step title="Public registration">
+    A business owner visits `/registrar-negocio`. The React/Inertia form is served by `RegisterTenantController@create`. The POST endpoint is rate-limited to 5 attempts per minute.
+
+    ```php
+    // routes/web.php
+    Route::get('/registrar-negocio', 'create')->name('tenant.register');
+    Route::post('/registrar-negocio', 'store')
+        ->middleware('throttle:5,1')
+        ->name('tenant.register.store');
+    ```
+  </Step>
+  <Step title="Slug uniqueness check">
+    The UI calls `GET /api/check-slug` before submission to verify slug availability without full form submission.
+  </Step>
+  <Step title="Atomic registration">
+    `RegisterTenantController@store` creates the `User` and `Tenant` records in a single database transaction. The tenant starts on the `semilla` plan.
+  </Step>
+  <Step title="Payment (optional)">
+    For paid plans, the owner is redirected to `/registro/pago-pendiente/{payment}` to monitor payment confirmation status.
+  </Step>
+  <Step title="Workspace access">
+    After registration, the owner accesses the operational workspace at `/workspace/dashboard` or the Filament panel at `/app`.
+  </Step>
+</Steps>
+
+## Plan system
+
+```php
+// app/Models/Tenant.php
+public const PLAN_SEMILLA = 'semilla';     // Free tier
+public const PLAN_CRECIMIENTO = 'crecimiento'; // Growth tier
+public const PLAN_COSECHA = 'cosecha';    // Harvest tier
+
+// Computed: is_pro is true when plan_type is 'pro' or 'enterprise'
+// and subscription_status is 'active' or 'trial'
+public function getIsProAttribute(): bool
+{
+    $value = $this->plan_type->value;
+    if (!in_array($value, ['pro', 'enterprise'])) return false;
+    if (in_array($this->subscription_status, ['past_due', 'canceled'])) return false;
+    return $this->subscription_ends_at === null || $this->subscription_ends_at->isFuture();
+}
+```
+
+## Subscription statuses
+
+| Status | Label | Can use PRO features |
+|---|---|---|
+| `active` | Activo | Yes |
+| `trial` | Período de Prueba | Yes |
+| `past_due` | Vencido | No |
+| `canceled` | Cancelado | No |
+
+## Capability gating
+
+Feature flags are evaluated at runtime through the `CapabilityManagerInterface`:
+
+```php
+// app/Models/Tenant.php
+public function hasCapability(Capability $capability): bool
+{
+    return app(CapabilityManagerInterface::class)->has($this, $capability);
+}
+```
+
+The `getPublicMenuStructure()` method is an example of plan-gated data access — it returns `null` for non-pro tenants, triggering the fallback flat product list.
+
+## Media collections
+
+The `Tenant` model registers three Spatie Medialibrary collections:
+
+```php
+// app/Models/Tenant.php
+public function registerMediaCollections(): void
+{
+    $this->addMediaCollection('logo')->singleFile()->useDisk('public');
+    $this->addMediaCollection('cover')->singleFile()->useDisk('public');
+    $this->addMediaCollection('hero')->singleFile()->useDisk('public');
+}
+```
+
+Conversions registered: `thumb` (400×400) and `optimized` (800px WebP at 80% quality).
+
+## Activity logging
+
+The `Tenant` model uses Spatie Activitylog. It logs changes to `name`, `is_active`, `plan_type`, and `subscription_status` under the `negocios` log name, with dirty-only tracking to suppress no-op updates.

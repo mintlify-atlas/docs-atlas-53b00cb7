@@ -1,0 +1,179 @@
+---
+title: "Progressive Web App"
+description: "PWA configuration, service worker, offline capability, and home screen installation."
+---
+
+Vito Business OS is a Progressive Web App (PWA). Users can install it on their phone or desktop home screen and receive push notifications even when the browser tab is closed. The PWA layer is managed by [`vite-plugin-pwa`](https://vite-pwa-org.netlify.app/), which generates a service worker and a Web App Manifest at build time.
+
+## Vite configuration
+
+The PWA plugin is configured in `vite.config.js`:
+
+```javascript
+// vite.config.js
+import { VitePWA } from 'vite-plugin-pwa';
+
+VitePWA({
+    registerType: 'autoUpdate',
+    outDir: 'public/build',
+    buildBase: '/build/',
+    scope: '/',
+    workbox: {
+        // Cache only static assets — never tenant data
+        globPatterns: ['**/*.{js,css,ico,png,svg,woff2}'],
+        cleanupOutdatedCaches: true,
+        // navigateFallback is null to prevent cross-tenant data leaks
+        navigateFallback: null,
+        runtimeCaching: [
+            {
+                urlPattern: /\.(?:png|jpg|jpeg|svg|gif|webp)$/,
+                handler: 'CacheFirst',
+                options: {
+                    cacheName: 'images-cache',
+                    expiration: {
+                        maxEntries: 50,
+                        maxAgeSeconds: 60 * 60 * 24 * 30, // 30 days
+                    },
+                },
+            },
+        ],
+    },
+    manifest: {
+        name: 'Conecta HN',
+        short_name: 'Conecta',
+        description: 'Infraestructura Digital para PyMEs de Honduras',
+        theme_color: '#000000',
+        background_color: '#ffffff',
+        display: 'standalone',
+        orientation: 'portrait',
+        scope: '/',
+        start_url: '/',
+        icons: [
+            { src: '/icon-192x192.png', sizes: '192x192', type: 'image/png' },
+            { src: '/icon-512x512.png', sizes: '512x512', type: 'image/png' },
+            { src: '/icon-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+        ],
+    },
+})
+```
+
+### Key configuration choices
+
+| Option | Value | Reason |
+|---|---|---|
+| `registerType` | `autoUpdate` | Service worker updates silently in the background |
+| `navigateFallback` | `null` | Prevents the service worker from serving cached HTML for API routes, avoiding cross-tenant data leaks |
+| `globPatterns` | `**/*.{js,css,ico,png,svg,woff2}` | Only static assets are pre-cached; never JSON or HTML |
+| `display` | `standalone` | Hides the browser chrome when installed, giving a native app feel |
+
+## App manifest
+
+The Web App Manifest is generated from the `manifest` key in `vite.config.js` and served from `/build/manifest.webmanifest`. Browsers use it to populate the install prompt and home screen icon.
+
+| Field | Value |
+|---|---|
+| `name` | Conecta HN |
+| `short_name` | Conecta |
+| `display` | `standalone` |
+| `theme_color` | `#000000` |
+| `background_color` | `#ffffff` |
+| `start_url` | `/` |
+| `orientation` | `portrait` |
+| Icons | 192×192 and 512×512 PNG, plus a maskable 512×512 |
+
+<Note>
+The maskable icon variant allows Android to apply adaptive icon shaping (circles, squircles, etc.) without clipping your logo. Make sure `/icon-512x512.png` has sufficient safe-zone padding.
+</Note>
+
+## Service worker
+
+`vite-plugin-pwa` generates a Workbox-powered service worker during `npm run build`. It is registered automatically with `registerType: 'autoUpdate'`.
+
+### What the service worker caches
+
+| Strategy | Assets |
+|---|---|
+| Pre-cache (at install) | All `.js`, `.css`, `.ico`, `.png`, `.svg`, `.woff2` files emitted by Vite |
+| `CacheFirst` (runtime) | Images matching `*.png`, `*.jpg`, `*.jpeg`, `*.svg`, `*.gif`, `*.webp` — cached for 30 days, max 50 entries |
+| Network only (implicit) | Everything else — API responses, HTML pages |
+
+<Warning>
+Do not add `navigateFallback` to the Workbox config. Because Vito Business OS is multi-tenant, a cached HTML document belonging to Tenant A could be served to Tenant B. Serving all HTML from the network ensures each request is authenticated and tenant-scoped correctly.
+</Warning>
+
+## Offline capability
+
+With the current configuration, the app shell (JS, CSS, fonts, icons) loads offline after the first visit. Dynamic content (orders, products, catalog data) requires a network connection because API responses are intentionally not cached.
+
+This design is a deliberate security trade-off: tenant data must never be stored in the browser cache where it could be accessed by another user on a shared device.
+
+## Installing the app
+
+<Tabs>
+  <Tab title="Android (Chrome)">
+    <Steps>
+      <Step title="Open the site in Chrome">
+        Navigate to the app URL in Chrome on Android.
+      </Step>
+      <Step title="Accept the install prompt">
+        Chrome shows an "Add to Home screen" banner or an install icon in the address bar. Tap it and confirm.
+      </Step>
+      <Step title="Launch from home screen">
+        The app opens in standalone mode — no browser address bar or navigation chrome.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="iOS (Safari)">
+    <Steps>
+      <Step title="Open the site in Safari">
+        Navigate to the app URL in Safari on iOS 16.4 or later.
+      </Step>
+      <Step title="Tap the Share button">
+        Tap the share icon at the bottom of the screen.
+      </Step>
+      <Step title="Add to Home Screen">
+        Scroll down in the share sheet and tap **Add to Home Screen**. Confirm the name and tap **Add**.
+      </Step>
+      <Step title="Grant push permission">
+        On first launch from the home screen, the app can request push notification permission. Push notifications require the app to be installed — they do not work from the Safari browser tab.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Desktop (Chrome / Edge)">
+    <Steps>
+      <Step title="Open the site">
+        Navigate to the app URL in Chrome or Edge on desktop.
+      </Step>
+      <Step title="Click the install icon">
+        Click the install icon in the address bar (a monitor with a down arrow), then click **Install**.
+      </Step>
+      <Step title="Launch from taskbar or dock">
+        The app opens as a standalone window without browser chrome. It appears as a separate entry in your taskbar or dock.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Integration with Web Push
+
+The service worker is the delivery point for background push notifications. When the Laravel backend sends a push via VAPID, the browser vendor's push service wakes the service worker even if the browser tab is closed.
+
+The service worker listens for the `push` event and displays the notification using the Notifications API. Tapping the notification triggers the `notificationclick` event, which opens the relevant URL from the notification payload.
+
+See the [push notifications](/realtime/push-notifications) page for the full frontend subscription flow and service worker event handler code.
+
+<Tip>
+During development, the service worker is not registered (`registerType: 'autoUpdate'` only applies in production builds). Run `npm run build && php artisan serve` and use a local HTTPS proxy to test the full PWA flow locally.
+</Tip>
+
+## Build output
+
+After running `npm run build`, the following files are emitted to `public/build/`:
+
+| File | Purpose |
+|---|---|
+| `sw.js` | Generated Workbox service worker |
+| `workbox-*.js` | Workbox runtime libraries |
+| `manifest.webmanifest` | Web App Manifest |
+
+The manifest is referenced automatically in the HTML `<head>` by the Vite plugin.

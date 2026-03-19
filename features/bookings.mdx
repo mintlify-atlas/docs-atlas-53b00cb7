@@ -1,0 +1,213 @@
+---
+title: "Bookings"
+description: "Service definitions, provider schedules, availability slot calculation, appointment confirmation, and reminder notifications."
+---
+
+The bookings system allows tenants to accept appointments for time-based services. Customers book from the public microsite; providers and business owners manage appointments from the Filament panel.
+
+## Core models
+
+<CardGroup cols={2}>
+  <Card title="Service" icon="wrench">
+    Defines what can be booked: name, duration in minutes, buffer times, price.
+  </Card>
+  <Card title="ServiceProvider" icon="user">
+    A staff member or resource that performs services, with their own schedule config.
+  </Card>
+  <Card title="Appointment" icon="calendar">
+    A booking record linking a customer, service, provider, and time slot.
+  </Card>
+  <Card title="OpeningHour" icon="clock">
+    Defines the tenant's weekly hours, used as the base for slot availability.
+  </Card>
+</CardGroup>
+
+## Service model
+
+```php
+// app/Models/Service.php
+protected $fillable = [
+    'name',
+    'description',
+    'duration_minutes',  // Stored in minutes (no TZ issues)
+    'buffer_before',     // Pre-appointment buffer (minutes)
+    'buffer_after',      // Post-appointment buffer (minutes)
+    'price',
+    'is_active',
+];
+```
+
+The total slot duration includes buffers:
+
+```php
+// app/Models/Service.php
+public function getTotalDurationAttribute(): int
+{
+    return $this->duration_minutes + $this->buffer_before + $this->buffer_after;
+}
+```
+
+## ServiceProvider model
+
+Each provider can have their own weekly schedule stored as `schedule_config` (JSON). When no provider-level config exists, the system falls back to the tenant's opening hours.
+
+```php
+// app/Models/ServiceProvider.php
+protected $fillable = [
+    'name', 'email', 'phone',
+    'schedule_config', // JSON: Spatie/opening-hours format
+    'is_active',
+];
+
+// Schedule hierarchy: provider config > tenant hours > default 9-5 M-F
+public function getOpeningHours(): OpeningHours
+{
+    if (!empty($this->schedule_config)) {
+        return OpeningHours::create($this->schedule_config);
+    }
+    return $this->tenant->getOpeningHours();
+}
+```
+
+## Availability calculation
+
+Availability checks use the `Spatie\OpeningHours` library and collision detection against existing appointments.
+
+```php
+// app/Models/ServiceProvider.php
+public function isAvailableAt(
+    DateTimeInterface $start,
+    DateTimeInterface $end,
+    int $bufferBefore = 0,
+    int $bufferAfter = 0
+): bool {
+    $paddedStart = CarbonImmutable::instance($start)->subMinutes($bufferBefore);
+    $paddedEnd   = CarbonImmutable::instance($end)->addMinutes($bufferAfter);
+
+    return !$this->appointments()
+        ->where('status', '!=', 'cancelled')
+        ->where('scheduled_at', '<', $paddedEnd)
+        ->where('end_at',       '>', $paddedStart)
+        ->exists();
+}
+```
+
+The tenant opening hours are built from `OpeningHour` model records:
+
+```php
+// app/Models/Tenant.php
+public function getOpeningHours(): OpeningHours
+{
+    $hours = [];
+    $dayMap = ['sunday', 'monday', 'tuesday', 'wednesday',
+               'thursday', 'friday', 'saturday'];
+
+    foreach ($this->openingHours as $openingHour) {
+        $dayName = $dayMap[$openingHour->day_of_week] ?? null;
+        if ($dayName && $open = $openingHour->getRawOpeningTime()) {
+            $hours[$dayName][] = substr($open, 0, 5) . '-' . substr($close, 0, 5);
+        }
+    }
+    // Fallback: Mon-Fri 09:00-17:00 if no hours configured
+    return OpeningHours::create($hours ?: [...]);
+}
+```
+
+## Appointment lifecycle
+
+```php
+// app/Models/Appointment.php
+public const STATUS_PENDING   = 'pending';
+public const STATUS_CONFIRMED = 'confirmed';
+public const STATUS_CANCELLED = 'cancelled';
+public const STATUS_COMPLETED = 'completed';
+public const STATUS_NO_SHOW   = 'no_show';
+```
+
+Transitions:
+
+```
+pending → confirmed → completed
+       ↘ cancelled
+       ↘ no_show
+```
+
+Each transition is enforced by the model's business methods:
+
+```php
+// app/Models/Appointment.php
+public function confirm(): bool {
+    if ($this->status !== self::STATUS_PENDING) return false;
+    $this->status = self::STATUS_CONFIRMED;
+    return $this->save();
+}
+
+public function complete(): bool {
+    if ($this->status !== self::STATUS_CONFIRMED) return false;
+    $this->status = self::STATUS_COMPLETED;
+    return $this->save();
+}
+
+public function cancel(): bool {
+    if (in_array($this->status, [STATUS_CANCELLED, STATUS_COMPLETED])) return false;
+    $this->status = self::STATUS_CANCELLED;
+    return $this->save();
+}
+```
+
+## Event dispatch on creation
+
+Appointment creation automatically dispatches the `AppointmentCreated` event:
+
+```php
+// app/Models/Appointment.php
+protected $dispatchesEvents = [
+    'created' => \App\Events\Appointment\AppointmentCreated::class,
+];
+```
+
+This triggers the appointment confirmation email to the customer.
+
+## Public booking page
+
+Customers book at `/t/{tenant}/book` (path-based local, or `{tenant}.domain.com/book` in production).
+
+The `BookingController` serves the Inertia page with the tenant's active services, active providers, and their availability configuration. The frontend renders available time slots based on the provider's schedule.
+
+## Appointment management portal
+
+Customers receive a signed URL after booking:
+
+```
+GET /appointments/{appointment}/manage
+```
+
+This is a publicly accessible page (no login required) protected by Laravel's signed URL middleware. Customers can cancel or reschedule their appointment without creating an account.
+
+## Reminder jobs
+
+The scheduler dispatches appointment reminder jobs every hour:
+
+```php
+// routes/console.php (scheduler)
+// Appointment reminders: every hour
+```
+
+The reminder job queries upcoming appointments with `reminder_sent_at = null` and `scheduled_at` within the configured reminder window, sends the reminder email, and updates `reminder_sent_at`.
+
+## Email notifications
+
+| Mail class | Trigger | Recipient |
+|---|---|---|
+| Appointment confirmed | `AppointmentCreated` event | Customer email |
+| Appointment reminder | Reminder job (scheduled hourly) | Customer email |
+
+Both mails are sent to the `customer_email` field on the `Appointment` record. Guest bookings (no user account) are fully supported.
+
+## Panel management
+
+The Filament tenant panel (`/app`) includes:
+
+- `AppointmentResource` — view, filter, and manage all appointments
+- `ServiceResource` — create and manage bookable services
+- `ServiceProviderResource` — manage staff/resource schedules

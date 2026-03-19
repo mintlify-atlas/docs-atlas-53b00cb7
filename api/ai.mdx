@@ -1,0 +1,181 @@
+---
+title: "AI"
+description: "AI-powered business profile generation and optimization. All operations are asynchronous."
+---
+
+<Note>
+Both AI endpoints are asynchronous. Requests return `202 Accepted` immediately and dispatch a background job. A push notification or in-app notification is sent when the result is ready.
+</Note>
+
+## POST /api/v1/ai/generate
+
+Generate a business profile using AI based on basic business details. Dispatches a `GenerateBusinessProfile` background job.
+
+**Middleware:** `auth:sanctum`, `throttle:api`  
+**Authentication:** Required
+
+### Budget enforcement
+
+In addition to the route-level throttle, this endpoint enforces a **token bucket** rate limit: **5 requests per hour per user** (key: `ai-gen:{user_id}`). When the budget is exhausted the endpoint returns `429` with a countdown until the next available slot.
+
+The user must also have an associated `tenant_id`. Requests without a tenant return `403`.
+
+### Request body
+
+<ParamField body="business_name" type="string" required>
+  Business name. Between 3 and 100 characters.
+</ParamField>
+
+<ParamField body="activity" type="string" required>
+  Primary business activity or industry. Maximum 50 characters.
+</ParamField>
+
+<ParamField body="location" type="string" required>
+  Geographic location of the business. Maximum 50 characters.
+</ParamField>
+
+<ParamField body="extra_details" type="string">
+  Optional additional context for the AI. Maximum 200 characters.
+</ParamField>
+
+### Response `202 Accepted`
+
+<ResponseField name="status" type="string">`processing`</ResponseField>
+<ResponseField name="message" type="string">Confirmation message that the AI is working on the profile.</ResponseField>
+<ResponseField name="remaining_attempts" type="integer">Number of remaining AI generation attempts in the current hour.</ResponseField>
+
+### Response `403 Forbidden`
+
+Returned when the authenticated user has no associated tenant.
+
+<ResponseField name="message" type="string">`No business associated.`</ResponseField>
+
+### Response `429 Too Many Requests`
+
+Returned when the per-user token bucket is exhausted.
+
+<ResponseField name="message" type="string">Countdown message with minutes and seconds until the next slot.</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://yourdomain.com/api/v1/ai/generate \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "business_name": "Pupusas Don Carlos",
+    "activity": "Restaurante",
+    "location": "Tegucigalpa, Honduras",
+    "extra_details": "Especialidad en comida típica hondureña"
+  }'
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch('https://yourdomain.com/api/v1/ai/generate', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+  body: JSON.stringify({
+    business_name: 'Pupusas Don Carlos',
+    activity: 'Restaurante',
+    location: 'Tegucigalpa, Honduras',
+    extra_details: 'Especialidad en comida típica hondureña',
+  }),
+});
+const { status, remaining_attempts } = await res.json();
+```
+
+</CodeGroup>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `401` | Missing or invalid token |
+| `403` | User has no associated tenant |
+| `422` | Validation failure (missing required fields, length violations) |
+| `429` | Per-user AI budget exhausted |
+
+---
+
+## POST /api/v1/ai/optimize-profile
+
+Queue an AI-powered optimization of an existing business profile. Accepts structured inputs including tone, target audience, and keywords. Dispatches a `GenerateBusinessProfileJob`.
+
+**Middleware:** `auth:sanctum`, `throttle:api`  
+**Authentication:** Required
+
+### Request body
+
+<ParamField body="business_name" type="string" required>
+  Business name. Maximum 255 characters.
+</ParamField>
+
+<ParamField body="description" type="string" required>
+  Current business description. Between 10 and 1000 characters.
+</ParamField>
+
+<ParamField body="target_audience" type="string" required>
+  Description of the intended audience. Maximum 255 characters.
+</ParamField>
+
+<ParamField body="keywords" type="string[]" required>
+  Array of keywords (maximum 10 keywords, each up to 50 characters).
+</ParamField>
+
+<ParamField body="tone" type="string" required>
+  Writing tone for the optimized profile. One of: `formal`, `casual`, `persuasive`, `witty`, `professional`.
+</ParamField>
+
+### Response `202 Accepted`
+
+<ResponseField name="status" type="string">`processing`</ResponseField>
+<ResponseField name="message" type="string">`Profile optimization has been queued.`</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://yourdomain.com/api/v1/ai/optimize-profile \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "business_name": "Pupusas Don Carlos",
+    "description": "Restaurante familiar en Tegucigalpa con 10 años de experiencia.",
+    "target_audience": "Familias y jóvenes profesionales",
+    "keywords": ["pupusas", "comida típica", "Honduras"],
+    "tone": "casual"
+  }'
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch('https://yourdomain.com/api/v1/ai/optimize-profile', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+  body: JSON.stringify({
+    business_name: 'Pupusas Don Carlos',
+    description: 'Restaurante familiar en Tegucigalpa con 10 años de experiencia.',
+    target_audience: 'Familias y jóvenes profesionales',
+    keywords: ['pupusas', 'comida típica', 'Honduras'],
+    tone: 'casual',
+  }),
+});
+const { status } = await res.json();
+```
+
+</CodeGroup>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `401` | Missing or invalid token |
+| `422` | Validation failure (tone not in allowed list, keywords > 10, description too short) |

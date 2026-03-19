@@ -1,0 +1,360 @@
+---
+title: "Broadcasting"
+description: "Real-time WebSocket broadcasting with Laravel Reverb and Laravel Echo."
+---
+
+Vito Business OS uses [Laravel Reverb](https://reverb.laravel.com) as the WebSocket server and [Laravel Echo](https://github.com/laravel/echo) as the browser client. Events broadcast from the server are received by connected clients instantly, without polling.
+
+## Architecture
+
+```
+HTTP Request
+    │
+    ▼
+Laravel Queue Worker
+    │  dispatches broadcast event
+    ▼
+Laravel Reverb (WebSocket server, port 8080)
+    │  pushes to subscribed channels
+    ▼
+Laravel Echo (browser)
+    │  calls your React listener
+    ▼
+UI update
+```
+
+Broadcast events are queued — they never block the HTTP response. The queue worker (`queue:work`) deserializes the event and forwards it to Reverb, which fans it out to all subscribers on the target channel.
+
+## Channel topology
+
+All channel names and their authorization logic live in a single file — `ChannelRegistry` — to keep naming consistent across events and authorization rules.
+
+| Channel pattern | Access | Purpose |
+|---|---|---|
+| `tenant.{id}` | Any authenticated user belonging to the tenant | Order events (paid, cancelled, shipped, refunded) |
+| `tenant.{id}.admins` | Users with role `seller` or `super_admin` | Low-stock alerts, new login security alerts |
+| `user.{id}` | The user themselves | Personal notifications (login alert, profile update) |
+| `order.{id}` | The customer who placed the order | Customer-facing order tracking |
+
+### Authorization (routes/channels.php)
+
+```php
+use App\Broadcasting\ChannelRegistry;
+use Illuminate\Support\Facades\Broadcast;
+
+// Tenant channel — any member of the tenant
+Broadcast::channel(ChannelRegistry::TENANT_CHANNEL_PATTERN, function ($user, $id) {
+    return $user->tenant_id === (int) $id;
+});
+
+// Admin-only channel — seller or super_admin only
+Broadcast::channel(ChannelRegistry::TENANT_ADMIN_CHANNEL_PATTERN, function ($user, $id) {
+    if ($user->tenant_id !== (int) $id) {
+        return false;
+    }
+    return in_array($user->role, ['seller', 'super_admin'], true);
+});
+
+// User channel — the user themselves
+Broadcast::channel(ChannelRegistry::USER_CHANNEL_PATTERN, function ($user, $id) {
+    return $user->id === (int) $id;
+});
+
+// Order channel — the customer who placed the order
+Broadcast::channel(ChannelRegistry::ORDER_CHANNEL_PATTERN, function ($user, $id) {
+    $customerId = \App\Models\Order::where('id', $id)
+        ->where('tenant_id', $user->tenant_id)
+        ->value('customer_id');
+
+    return $customerId !== null && $user->id === $customerId;
+});
+```
+
+<Warning>
+Never reference channel name strings directly in event classes. Always use `ChannelRegistry::tenant()`, `ChannelRegistry::tenantAdmins()`, `ChannelRegistry::user()`, or `ChannelRegistry::order()`. This ensures the channel name in the event and the authorization rule always match.
+</Warning>
+
+## Broadcast events
+
+All events live in `app/Events/Broadcast/` and implement `BroadcastableNotification`.
+
+<CardGroup cols={2}>
+  <Card title="OrderPaidBroadcast" icon="circle-check">
+    Broadcast name: `order.paid`. Sent to `tenant.{id}`. Payload includes order number, formatted amount, payment method, and timestamp.
+  </Card>
+  <Card title="OrderCancelledBroadcast" icon="circle-x">
+    Broadcast name: `order.cancelled`. Sent to `tenant.{id}`. Payload includes reason and a `should_refund` boolean.
+  </Card>
+  <Card title="OrderShippedBroadcast" icon="truck">
+    Broadcast name: `order.shipped`. Sent to `tenant.{id}`. Payload includes carrier, tracking number, and estimated delivery.
+  </Card>
+  <Card title="OrderRefundedBroadcast" icon="arrow-path">
+    Broadcast name: `order.refunded`. Sent to `tenant.{id}`. Payload distinguishes partial vs. full refunds.
+  </Card>
+  <Card title="LowStockBroadcast" icon="triangle-alert">
+    Broadcast name: `inventory.stock.low`. Sent to `tenant.{id}.admins`. Payload includes severity, current stock, and threshold.
+  </Card>
+  <Card title="NewLoginDetectedBroadcast" icon="shield-alert">
+    Broadcast name: `security.login.new`. Sent to both `tenant.{id}.admins` and `user.{id}`. Payload includes IP address and parsed device string.
+  </Card>
+  <Card title="BusinessProfileUpdated" icon="building">
+    Broadcast name: `business.profile.updated`. Sent to `user.{id}`. Contains pre-computed profile payload with no DB queries on broadcast.
+  </Card>
+</CardGroup>
+
+### Example event class
+
+```php
+// app/Events/Broadcast/OrderPaidBroadcast.php
+
+public function broadcastOn(): array
+{
+    return [ChannelRegistry::tenant($this->tenantId)];
+}
+
+public function broadcastAs(): string
+{
+    return 'order.paid';
+}
+
+public function broadcastWith(): array
+{
+    return [
+        '_version'         => self::PAYLOAD_VERSION,
+        '_timestamp'       => (new DateTimeImmutable)->format(DateTimeImmutable::ATOM),
+        'title'            => __('notifications.order_paid.title', ['order' => $this->orderNumber]),
+        'message'          => __('notifications.order_paid.message', [
+            'amount' => $this->formatMoney($this->amountCents, $this->currency),
+            'order'  => $this->orderNumber,
+        ]),
+        'status'           => 'paid',
+        'icon'             => 'check-circle',
+        'tenant_id'        => $this->tenantId,
+        'order_id'         => $this->orderId,
+        'order_number'     => $this->orderNumber,
+        'amount_formatted' => $this->formatMoney($this->amountCents, $this->currency),
+        'payment_method'   => $this->paymentMethod,
+        'paid_at'          => $this->paidAt->format(DateTimeImmutable::ATOM),
+    ];
+}
+```
+
+<Note>
+All broadcast events set `$tries = 1` and `$timeout = 30` seconds, and expire after 60 seconds via `retryUntil()`. Stale events are discarded rather than retried.
+</Note>
+
+## Environment configuration
+
+Add these variables to your `.env` file:
+
+```env
+BROADCAST_CONNECTION=reverb
+
+REVERB_APP_ID=your-app-id
+REVERB_APP_KEY=your-app-key
+REVERB_APP_SECRET=your-app-secret
+REVERB_HOST=localhost
+REVERB_PORT=8080
+REVERB_SCHEME=http
+
+# Exposed to Vite / frontend
+VITE_REVERB_APP_KEY="${REVERB_APP_KEY}"
+VITE_REVERB_HOST="${REVERB_HOST}"
+VITE_REVERB_PORT="${REVERB_PORT}"
+VITE_REVERB_SCHEME="${REVERB_SCHEME}"
+```
+
+For production, change `REVERB_PORT` to `443`, `REVERB_SCHEME` to `https`, and set `REVERB_HOST` to your domain.
+
+## Frontend: Laravel Echo
+
+Echo is initialized in `resources/js/bootstrap.js` and mounted on `window.Echo`:
+
+```javascript
+// resources/js/bootstrap.js
+import Echo from 'laravel-echo';
+import Pusher from 'pusher-js';
+
+window.Pusher = Pusher;
+
+const reverbScheme = (import.meta.env.VITE_REVERB_SCHEME ?? 'https').toLowerCase().trim();
+
+window.Echo = new Echo({
+    broadcaster: 'reverb',
+    key: import.meta.env.VITE_REVERB_APP_KEY,
+    wsHost: import.meta.env.VITE_REVERB_HOST,
+    wsPort: import.meta.env.VITE_REVERB_PORT ?? 80,
+    wssPort: import.meta.env.VITE_REVERB_PORT ?? 443,
+    forceTLS: reverbScheme === 'https',
+    enabledTransports: ['ws', 'wss'],
+});
+```
+
+<Note>
+Reverb uses the Pusher wire protocol. The `broadcaster: 'reverb'` option and `pusher-js` dependency are both required even though you are not using Pusher's hosted service.
+</Note>
+
+### Listening to events in React
+
+```tsx
+import { useEffect } from 'react';
+
+function useOrderPaid(tenantId: number, onPaid: (data: unknown) => void) {
+    useEffect(() => {
+        const channel = window.Echo
+            .private(`tenant.${tenantId}`)
+            .listen('.order.paid', (data: unknown) => {
+                onPaid(data);
+            });
+
+        return () => {
+            channel.stopListening('.order.paid');
+            window.Echo.leave(`tenant.${tenantId}`);
+        };
+    }, [tenantId, onPaid]);
+}
+```
+
+<Note>
+Event names registered with `broadcastAs()` must be prefixed with a `.` when passed to `.listen()`. The dot tells Echo the name is already fully qualified and should not be namespaced.
+</Note>
+
+Listening to the admin-only channel for security alerts:
+
+```tsx
+window.Echo
+    .private(`tenant.${tenantId}.admins`)
+    .listen('.security.login.new', (data) => {
+        showAlert(`New login from ${data.ip_address} on ${data.device}`);
+    });
+```
+
+## Production setup
+
+<Tabs>
+  <Tab title="Development">
+    Start the Reverb server locally:
+
+    ```bash
+    php artisan reverb:start
+    ```
+
+    Start the queue worker:
+
+    ```bash
+    php artisan queue:work redis --queue=exports,notifications,default
+    ```
+
+    Reverb listens on `ws://localhost:8080` by default.
+  </Tab>
+  <Tab title="Production">
+    In production, Nginx terminates TLS and proxies WebSocket connections to Reverb on port 8080. Supervisor keeps both the Reverb process and queue workers running as daemons.
+
+    ### Nginx WebSocket proxy
+
+    Add this block inside your HTTPS `server {}` block (`deployment/nginx/reverb_wss.conf`):
+
+    ```nginx
+    location /app {
+        proxy_pass http://127.0.0.1:8080;
+
+        # WebSocket handshake headers
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+
+        # Proxy headers
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Timeouts
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+
+        # Disable buffering for real-time responsiveness
+        proxy_buffering off;
+    }
+
+    location /apps {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    ```
+
+    ### Supervisor: Reverb process
+
+    Place this in `/etc/supervisor/conf.d/laravel-reverb.conf`. Replace `[APP_PATH]` and `[USER]` with your actual values (`deployment/supervisor/laravel-reverb.conf`):
+
+    ```ini
+    [program:laravel-reverb]
+    command=php [APP_PATH]/artisan reverb:start --host=0.0.0.0 --port=8080
+    directory=[APP_PATH]
+    user=[USER]
+    autostart=true
+    autorestart=true
+    startsecs=10
+    startretries=3
+    stopwaitsecs=3600
+    stopsignal=SIGTERM
+    stdout_logfile=/var/log/supervisor/reverb.log
+    stdout_logfile_maxbytes=50MB
+    stdout_logfile_backups=10
+    stderr_logfile=/var/log/supervisor/reverb.err.log
+    stderr_logfile_maxbytes=50MB
+    stderr_logfile_backups=10
+    environment=LARAVEL_SAIL="0"
+    ```
+
+    ### Supervisor: Queue workers
+
+    The queue worker configuration spawns two parallel workers (`deployment/supervisor/laravel-worker.conf`):
+
+    ```ini
+    [program:laravel-worker]
+    process_name=%(program_name)s_%(process_num)02d
+    command=php [APP_PATH]/artisan queue:work redis --sleep=3 --tries=3 --max-time=3600 --queue=exports,notifications,default
+    directory=[APP_PATH]
+    user=[USER]
+    numprocs=2
+    autostart=true
+    autorestart=true
+    startsecs=10
+    startretries=3
+    stopwaitsecs=3600
+    stopsignal=SIGTERM
+    stdout_logfile=/var/log/supervisor/worker_%(process_num)02d.log
+    stdout_logfile_maxbytes=50MB
+    stdout_logfile_backups=5
+    stderr_logfile=/var/log/supervisor/worker_%(process_num)02d.err.log
+    stderr_logfile_maxbytes=50MB
+    stderr_logfile_backups=5
+    environment=LARAVEL_SAIL="0"
+    ```
+
+    After placing the config files, reload Supervisor:
+
+    ```bash
+    supervisorctl reread
+    supervisorctl update
+    supervisorctl start laravel-reverb
+    supervisorctl start laravel-worker:*
+    ```
+  </Tab>
+</Tabs>
+
+## Reverb scaling
+
+For deployments running multiple PHP processes or servers, Reverb supports Redis-backed horizontal scaling:
+
+```env
+REVERB_SCALING_ENABLED=true
+REVERB_SCALING_CHANNEL=reverb
+```
+
+When enabled, Reverb uses Redis pub/sub to fan events across all Reverb instances.

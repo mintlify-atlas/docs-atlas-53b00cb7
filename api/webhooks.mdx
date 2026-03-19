@@ -1,0 +1,143 @@
+---
+title: "Webhooks"
+description: "Inbound payment webhook endpoint, signature verification, supported events, and idempotency handling."
+---
+
+## POST /api/webhooks/payment
+
+Receive payment lifecycle events from the payment provider.
+
+**Route name:** `webhooks.payment`  
+**Path:** `/api/webhooks/payment` (note: no `/v1` prefix — legacy path maintained)  
+**Authentication:** HMAC signature verification (see below)  
+**CSRF:** Exempt
+
+<Note>
+This endpoint is exempt from CSRF verification. Access control is enforced exclusively through HMAC signature validation on every incoming request.
+</Note>
+
+## Signature verification
+
+Every request must include an `X-Signature` header containing an HMAC-SHA256 signature of the raw request body.
+
+The server verifies the signature using the secret configured in `PAYMENT_WEBHOOK_SECRET` (`.env`):
+
+```
+PAYMENT_WEBHOOK_SECRET=whsec_your_secret_here
+```
+
+The expected signature is computed as:
+
+```
+hmac_sha256(raw_request_body, PAYMENT_WEBHOOK_SECRET)
+```
+
+If the `X-Signature` header is missing or does not match, the endpoint returns `403 Forbidden`.
+
+```bash
+# Example: computing the signature for testing
+SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$PAYMENT_WEBHOOK_SECRET" -hex | awk '{print $2}')
+```
+
+## Request format
+
+<ParamField header="X-Signature" type="string" required>
+  HMAC-SHA256 hex signature of the raw request body.
+</ParamField>
+
+<ParamField body="event" type="string" required>
+  Event type identifier (see supported events below).
+</ParamField>
+
+<ParamField body="data" type="object" required>
+  Event payload. Structure varies by event type.
+  <Expandable title="common data fields">
+    <ResponseField name="transaction_id" type="string">Unique transaction identifier from the payment provider.</ResponseField>
+  </Expandable>
+</ParamField>
+
+## Supported events
+
+| Event type | Description |
+|------------|-------------|
+| Payment confirmed | Order payment successfully completed |
+| Payment rejected | Payment attempt failed or was declined |
+| Subscription created | New subscription activated |
+| Subscription cancelled | Subscription terminated |
+| Subscription renewed | Subscription billing cycle renewed |
+
+<Note>
+Event type strings are defined by the payment provider integration. Check the `HandlePaymentWebhookAction` domain action for the full list of handled event types.
+</Note>
+
+## Response
+
+| Status | Body | Meaning |
+|--------|------|---------|
+| `200 OK` | `{"status": "ok"}` | Event processed successfully |
+| `202 Accepted` | `{"status": "ignored"}` | Event received but not processed (unknown type) |
+| `403 Forbidden` | `{"message": "Invalid signature"}` | Signature missing or invalid |
+| `422 Unprocessable Entity` | `{"status": "invalid"}` | Event payload failed domain validation |
+| `500 Internal Server Error` | `{"status": "error"}` | Unexpected processing error |
+
+## Idempotency
+
+All incoming webhook events are persisted to the `webhook_logs` table via the `WebhookLog` model **before** processing. This provides:
+
+- **Idempotency:** Duplicate events with the same `external_event_id` can be detected by querying the log.
+- **Audit trail:** Every received payload is stored for forensic debugging.
+- **Replay support:** Failed events can be replayed from the log.
+
+### `WebhookLog` model
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | integer | Auto-increment primary key |
+| `provider` | string | Payment provider identifier |
+| `external_event_id` | string | Unique event ID from the provider |
+| `event_type` | string | Normalized event type string |
+| `payload` | JSON | Full raw payload |
+| `created_at` | datetime | When the event was received |
+
+<Warning>
+Do not delete rows from `webhook_logs`. This table is the source of truth for payment audit trails and must be retained for compliance purposes.
+</Warning>
+
+## Example webhook delivery
+
+<CodeGroup>
+
+```bash cURL (test delivery)
+PAYLOAD='{"event":"payment.confirmed","data":{"transaction_id":"txn_abc123"}}'
+SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "whsec_your_secret" -hex | awk '{print $2}')
+
+curl -X POST https://yourdomain.com/api/webhooks/payment \
+  -H "Content-Type: application/json" \
+  -H "X-Signature: $SIGNATURE" \
+  -d "$PAYLOAD"
+```
+
+```typescript TypeScript (provider SDK)
+// Most payment providers handle signing automatically.
+// This example shows manual construction for testing.
+const payload = JSON.stringify({
+  event: 'payment.confirmed',
+  data: { transaction_id: 'txn_abc123' },
+});
+
+import { createHmac } from 'crypto';
+const signature = createHmac('sha256', process.env.PAYMENT_WEBHOOK_SECRET!)
+  .update(payload)
+  .digest('hex');
+
+await fetch('https://yourdomain.com/api/webhooks/payment', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-Signature': signature,
+  },
+  body: payload,
+});
+```
+
+</CodeGroup>

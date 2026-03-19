@@ -1,0 +1,77 @@
+---
+title: "Authentication"
+description: "How to authenticate requests to the Vito Business OS API using Laravel Sanctum bearer tokens."
+---
+
+## Overview
+
+The API uses **Laravel Sanctum** token-based authentication. Every protected endpoint requires a valid bearer token in the `Authorization` request header.
+
+```
+Authorization: Bearer <your-token>
+```
+
+Routes protected by the `auth:sanctum` middleware return `401 Unauthenticated` when no valid token is present.
+
+## Obtaining a token
+
+You can get a token through two flows:
+
+### Email / password registration
+
+Call `POST /api/v1/register`. On success the response includes an `accessToken` field. Store this token and attach it to subsequent requests.
+
+### OTP flow
+
+1. Call `POST /api/v1/otp/generate` with an email or phone `identifier`. Receives a UUID back.
+2. Call `POST /api/v1/otp/verify` with that UUID and the 6-digit OTP code. Returns an access token on success.
+
+### Social login
+
+Call `POST /api/v1/auth/social` with an OAuth provider token. Returns an access token and a redirect hint.
+
+See [Auth endpoints](/api/auth) for the full request/response details of each flow.
+
+## Example authenticated request
+
+<CodeGroup>
+
+```bash cURL
+curl -X GET https://yourdomain.com/api/v1/user \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN_HERE"
+```
+
+```typescript TypeScript (fetch)
+const response = await fetch('https://yourdomain.com/api/v1/user', {
+  method: 'GET',
+  headers: {
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+});
+
+const user = await response.json();
+```
+
+</CodeGroup>
+
+## Token scopes
+
+Sanctum tokens issued by this API do not use granular scopes. All tokens grant access to every endpoint the authenticated user is authorized to reach based on tenant ownership and role.
+
+| Token name | Issued by |
+|------------|-----------|
+| `api-token` | Email/password registration |
+| `social-api-token` | Social login (`POST /api/v1/auth/social`) |
+
+## Middleware reference
+
+| Middleware | Purpose |
+|------------|---------|
+| `auth:sanctum` | Requires a valid Sanctum bearer token. |
+| `tenant.ownership` | Ensures the authenticated user owns the resolved tenant. Applied to all protected tenant routes. |
+
+<Note>
+Tokens do not expire automatically. Revoke them through the Sanctum token management interface or directly in the `personal_access_tokens` table.
+</Note>

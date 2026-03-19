@@ -1,0 +1,175 @@
+---
+title: "Queues & Jobs"
+description: "Queue configuration, background job catalog, Supervisor worker setup, the transactional outbox pattern, and failed job handling."
+---
+
+## Queue Configuration
+
+Vito Business OS defaults to **Redis** as the queue driver in production. The `.env.example` ships with:
+
+```env
+QUEUE_CONNECTION=redis
+REDIS_CLIENT=phpredis
+REDIS_HOST=127.0.0.1
+REDIS_PASSWORD=null
+REDIS_PORT=6379
+```
+
+For simpler deployments without Redis, switch to the database driver:
+
+```env
+QUEUE_CONNECTION=database
+```
+
+<Warning>
+The database queue driver is not recommended for production at scale. It requires polling and creates additional write load. Use Redis when your workload exceeds a few dozen jobs per minute.
+</Warning>
+
+## Queue Workers
+
+Two Supervisor-managed workers handle jobs (see `devops/conecta-worker.conf`):
+
+| Worker | Queue(s) | Processes | Purpose |
+|---|---|---|---|
+| `conecta-worker` | `default` | 2 | General jobs — emails, analytics, reports, media |
+| `conecta-worker-high` | `high`, then `default` | 1 | Time-sensitive operations — payments, webhooks |
+
+Worker flags:
+
+```bash
+# Default worker
+php artisan queue:work redis \
+    --sleep=3 \
+    --tries=3 \
+    --max-time=3600 \
+    --max-jobs=1000 \
+    --memory=256
+
+# High-priority worker
+php artisan queue:work redis \
+    --queue=high,default \
+    --sleep=1 \
+    --tries=5 \
+    --max-time=3600 \
+    --max-jobs=500 \
+    --memory=256
+```
+
+Workers self-recycle after 3,600 seconds or 1,000 jobs to prevent memory leaks. After a deployment, signal workers to restart gracefully:
+
+```bash
+php artisan queue:restart
+```
+
+## Job Catalog
+
+<CardGroup cols={2}>
+  <Card title="AI & Enrichment" icon="sparkles">
+    **`EnhanceTenantProfileJob`** — Applies AI-generated descriptions and tags to a tenant's business profile. Implements `ShouldBeUnique` with a per-tenant lock (`uniqueFor = 3600`) to prevent duplicate enhancement runs. Timeout: 180s, retries: 3.
+
+    **`GenerateBusinessProfile`** — Generates an initial AI business profile for newly onboarded tenants.
+  </Card>
+
+  <Card title="Analytics" icon="chart-bar">
+    **`SyncAnalyticsJob`** — Batch analytics coordinator. Iterates all approved tenants (in chunks of 500) and dispatches `SyncTenantAnalytics` for each. Implements `ShouldBeUnique` with a daily date key to prevent duplicate runs.
+
+    **`SyncTenantAnalytics`** — Syncs analytics data for a single tenant on a specific date.
+
+    **`RecordInteraction`** — Records a single visitor or interaction event for analytics.
+  </Card>
+
+  <Card title="Exports" icon="arrow-down-tray">
+    **`GenerateSalesExport`** — Generates a downloadable sales export (Excel/CSV) for a tenant. Dispatched by the Filament export action. The download link uses a **signed URL** to prevent unauthorized access.
+  </Card>
+
+  <Card title="Reporting" icon="document-chart-bar">
+    **`GeneratePdfReportJob`** — Generates a PDF report for a tenant. Download links are delivered via **signed URLs**.
+  </Card>
+
+  <Card title="Governance" icon="shield-check">
+    **`ReleaseStaleOrders`** — Cancels PENDING orders older than 30 minutes and restores `stock_quantity`. Can run globally (all tenants) or scoped to a single tenant. Also dispatched by the scheduler every 15 minutes.
+
+    **`AuditTenantLimits`** — Audits tenant resource usage against their subscription plan limits.
+  </Card>
+
+  <Card title="Media" icon="photo">
+    **`GenerateProductBlurhash`** — Generates a [BlurHash](https://blurha.sh) placeholder for product images. Dispatched asynchronously after an image is uploaded so the initial upload response is fast.
+  </Card>
+
+  <Card title="Marketing" icon="megaphone">
+    **`SendCampaignEmail`** — Sends a marketing campaign email to a specific recipient. Dispatched in a fan-out pattern, one job per recipient, to control throughput and enable per-recipient retry logic.
+  </Card>
+
+  <Card title="Appointments" icon="calendar">
+    **`SendAppointmentReminders`** — Polls for appointments occurring in the next 23–24 hours and sends reminder emails. Idempotent via `reminder_sent_at` column. Also dispatched by the scheduler hourly.
+  </Card>
+</CardGroup>
+
+## Payment Webhook Processing
+
+Payment webhooks are received synchronously (to return a `200` quickly to the gateway), then processed asynchronously. The webhook controller validates the `PAYMENT_WEBHOOK_SECRET` signature before dispatching any work. Failed webhook jobs are retried up to 5 times by the `conecta-worker-high` process.
+
+See the [Security](/operations/security) page for webhook signature verification details.
+
+## Transactional Outbox Pattern
+
+Vito Business OS uses a **transactional outbox** to guarantee at-least-once delivery of domain events even if the application crashes after a database commit but before dispatching to the queue.
+
+When a command handler commits a transaction, it also writes a record to the `outbox_messages` table inside the same transaction. The `outbox:process` Artisan command (run every minute by the scheduler) reads unprocessed outbox entries and publishes them.
+
+```bash
+# Manual outbox processing (useful during debugging)
+php artisan outbox:process
+
+# Inspect stuck messages
+php artisan outbox:coroner
+
+# Replay a specific outbox message range
+php artisan outbox:replay
+
+# Prune old processed outbox records
+php artisan outbox:prune
+```
+
+The `outbox_messages` table is also pruned by `model:prune` daily at 04:00 via the `Prunable` trait on the model.
+
+## Failed Job Handling
+
+Failed jobs are stored in the `failed_jobs` table. Inspect and retry them with:
+
+```bash
+# List all failed jobs
+php artisan queue:failed
+
+# Retry a specific failed job by ID
+php artisan queue:retry <id>
+
+# Retry all failed jobs
+php artisan queue:retry all
+
+# Remove all failed jobs
+php artisan queue:flush
+```
+
+Each worker is configured with `--tries=3` (default) or `--tries=5` (high-priority). Once a job exceeds its retry limit it is moved to `failed_jobs` and no longer retried automatically.
+
+<Tip>
+Monitor the failed jobs table in the Filament super-admin panel or set up a periodic alert by querying `SELECT COUNT(*) FROM failed_jobs WHERE failed_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)` in your monitoring system.
+</Tip>
+
+## Monitoring Workers
+
+```bash
+# Check worker status
+sudo supervisorctl status conecta:*
+
+# Tail worker log in real time
+sudo supervisorctl tail -f conecta-worker:*
+
+# Or from the log file
+tail -f /var/www/conecta-hn/storage/logs/worker.log
+tail -f /var/www/conecta-hn/storage/logs/worker-high.log
+
+# Restart all workers
+sudo supervisorctl restart conecta:*
+```

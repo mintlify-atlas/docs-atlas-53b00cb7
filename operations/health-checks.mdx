@@ -1,0 +1,146 @@
+---
+title: "Health Checks"
+description: "Spatie Health integration, the /health endpoint, available checks, and the Architecture Health dashboard in the super-admin panel."
+---
+
+## Overview
+
+Vito Business OS uses [Spatie Laravel Health](https://spatie.be/docs/laravel-health) to monitor system component status. Health results are cached to a file store so the `/health` endpoint remains fast even when checks involve external services.
+
+## Health Endpoint
+
+The application exposes a `/health` endpoint configured in `config/health.php`. Nginx passes this path to PHP-FPM (not the static `200 OK` shortcut), so it exercises the full Laravel bootstrap and returns structured JSON.
+
+```bash
+curl https://yourdomain.com/health
+```
+
+Example response (when all checks pass):
+
+```json
+{
+  "finishedAt": "2026-03-19T10:00:00+00:00",
+  "checkResults": [
+    { "name": "Database", "status": "ok", "notificationMessage": "" },
+    { "name": "UsedDiskSpace", "status": "ok", "notificationMessage": "" },
+    { "name": "Cache", "status": "ok", "notificationMessage": "" }
+  ]
+}
+```
+
+HTTP status codes:
+
+| Code | Meaning |
+|---|---|
+| `200` | All checks passed |
+| `500` | One or more checks failed |
+
+## Configured Checks
+
+Checks are registered in `config/health.php`:
+
+```php
+'checks' => [
+    Spatie\Health\Checks\Checks\DatabaseCheck::class,
+
+    Spatie\Health\Checks\Checks\UsedDiskSpaceCheck::class => [
+        'warnWhenUsedSpaceIsAbovePercentage' => 70,
+        'failWhenUsedSpaceIsAbovePercentage' => 90,
+    ],
+
+    Spatie\Health\Checks\Checks\CacheCheck::class,
+],
+```
+
+| Check | Warn Threshold | Fail Threshold | What It Verifies |
+|---|---|---|---|
+| `DatabaseCheck` | — | Connection failure | Can connect to the configured database and execute a query |
+| `UsedDiskSpaceCheck` | 70% disk used | 90% disk used | Available disk space on the server |
+| `CacheCheck` | — | Write/read failure | Can write to and read from the configured cache store |
+
+## Result Store
+
+Health results are cached using the **file** store:
+
+```php
+'result_stores' => [
+    Spatie\Health\ResultStores\CacheHealthResultStore::class => [
+        'store' => 'file',
+    ],
+],
+```
+
+This means the `/health` endpoint returns the last cached result rather than running checks on every request. To force a fresh check, clear the health cache:
+
+```bash
+php artisan health:check
+```
+
+## OhDear Integration
+
+The health configuration includes an optional [OhDear](https://ohdear.app) endpoint. Enable it by setting the following environment variables:
+
+```env
+HEALTH_OH_DEAR_ENDPOINT_ENABLED=true
+HEALTH_OH_DEAR_SECRET=<your-ohdear-secret>
+```
+
+When enabled, OhDear can poll `/health` and alert on failures without requiring additional monitoring infrastructure.
+
+## Health Notifications
+
+Spatie Health can send notifications when a check transitions to a failing state. Enable notifications in `.env`:
+
+```env
+HEALTH_NOTIFICATIONS_ENABLED=true
+```
+
+Configure the notification channel (mail, Slack, etc.) in your application's notification setup.
+
+## Architecture Health Dashboard
+
+Beyond infrastructure checks, Vito Business OS ships an **Architecture Health** page accessible to super admins in the Filament admin panel at `/admin/architecture-health`.
+
+This page surfaces compliance metrics for the Domain Event architecture (ADR-002 Governance), including:
+
+- Event coverage summary
+- Per-event compliance status
+- Active architecture violations
+
+The dashboard is implemented in `app/Filament/Pages/ArchitectureHealth.php` and is restricted to `super_admin` users:
+
+```php
+public static function canAccess(): bool
+{
+    $user = auth()->user();
+    return $user instanceof User && $user->isSuperAdmin();
+}
+```
+
+<Note>
+The Architecture Health page tracks internal code quality metrics, not system uptime. It is intended for development and platform governance, not production alerting.
+</Note>
+
+## Load Balancer Health Check
+
+For load balancers that need a lightweight liveness probe (no PHP execution), Nginx returns a static `200 OK` from the `/health` location block directly:
+
+```nginx
+location = /health {
+    access_log off;
+    add_header Content-Type text/plain;
+    return 200 "OK";
+}
+```
+
+<Note>
+This Nginx-level `/health` response is separate from the Spatie Health `/health` endpoint. If you need the Spatie Health JSON output for your load balancer, remove or rename the Nginx `return 200` block so requests reach PHP-FPM.
+</Note>
+
+## Monitoring Recommendations
+
+- **Uptime monitoring:** Use OhDear, Better Uptime, or a similar service to poll `/health` every 60 seconds and alert on non-`200` responses.
+- **Disk space:** The `UsedDiskSpaceCheck` warns at 70% and fails at 90%. Configure server alerts at 80% as a secondary signal.
+- **Failed jobs:** Query `failed_jobs` periodically and alert when the count grows. A backlog of failed jobs usually indicates a downstream service outage.
+- **Worker liveness:** Monitor Supervisor with `supervisorctl status conecta:*` and alert if any process is in `STOPPED` or `FATAL` state.
+- **Log monitoring:** Tail `storage/logs/security.log` for `TENANT_OWNERSHIP_VIOLATION` events, which indicate potential IDOR probing.

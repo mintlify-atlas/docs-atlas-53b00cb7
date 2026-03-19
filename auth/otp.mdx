@@ -1,0 +1,193 @@
+---
+title: "One-time passwords"
+description: "Passwordless authentication via OTP — generate a code to an email or phone, then verify it to receive a session token."
+---
+
+Vito supports passwordless login through a two-step OTP flow. Users request a one-time code delivered to their email or phone, then submit the code to authenticate. A successful verification returns user context and a redirect path; if the identifier has no account, the response signals that registration is required.
+
+## OTP configuration
+
+OTP behavior is controlled in `config/auth.php` under the `otp` key:
+
+```php
+'otp' => [
+    'expiry_minutes'           => env('AUTH_OTP_EXPIRY_MINUTES', 10),
+    'max_requests_per_hour'    => env('AUTH_OTP_MAX_REQUESTS_PER_HOUR', 3),
+    'length'                   => env('AUTH_OTP_LENGTH', 6),
+    'rate_limit_decay_seconds' => env('AUTH_OTP_RATE_LIMIT_DECAY', 3600),
+    'max_attempts'             => env('AUTH_OTP_MAX_ATTEMPTS', 5),
+    'idempotency_ttl_seconds'  => env('AUTH_OTP_IDEMPOTENCY_TTL', 86400),
+],
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `AUTH_OTP_EXPIRY_MINUTES` | `10` | Minutes before a code expires |
+| `AUTH_OTP_MAX_REQUESTS_PER_HOUR` | `3` | Generation requests allowed per identifier per hour |
+| `AUTH_OTP_LENGTH` | `6` | Digit length of the code |
+| `AUTH_OTP_MAX_ATTEMPTS` | `5` | Failed verifications before the OTP is invalidated |
+| `AUTH_OTP_IDEMPOTENCY_TTL` | `86400` | Seconds to retain idempotency records |
+
+## OTP login flow
+
+<Steps>
+  <Step title="Client requests an OTP">
+    The user enters their email address or international phone number. The client sends a `POST` request to generate an OTP.
+
+    ```bash
+    POST /api/v1/otp/generate
+    Content-Type: application/json
+    Idempotency-Key: <uuid>
+
+    {
+      "identifier": "user@example.com"
+    }
+    ```
+
+    The `identifier` must be either a valid email address or an international phone number starting with `+` (E.164 format, e.g. `+50499887766`).
+
+    The `Idempotency-Key` header (optional) prevents duplicate codes from being sent if the network retries the request. The key is cached for `AUTH_OTP_IDEMPOTENCY_TTL` seconds.
+  </Step>
+  <Step title="Server generates and delivers the code">
+    The application creates an `OtpEntity` with a hashed code stored in the `one_time_passwords` table, then fires an `OtpGenerated` domain event. The `SendOtpNotificationListener` handles delivery via email or SMS depending on the identifier format.
+
+    The response includes the expiry timestamp:
+
+    ```json
+    {
+      "message": "Codigo enviado exitosamente.",
+      "expires_at": "2026-03-19T14:30:00+00:00"
+    }
+    ```
+  </Step>
+  <Step title="User submits the code">
+    The client prompts the user for the 6-digit code and submits it along with the UUID of the identifier returned from the OTP record (stored by the client after step 1).
+
+    ```bash
+    POST /api/v1/otp/verify
+    Content-Type: application/json
+
+    {
+      "uuid": "<otp-record-uuid>",
+      "otp_code": "123456"
+    }
+    ```
+  </Step>
+  <Step title="Server validates and responds">
+    The `VerifyOtpAction` checks the HMAC-hashed code, expiry, and attempt count. On success, the rate-limit hit counter is cleared.
+
+    **Existing user:**
+
+    ```json
+    {
+      "message": "Autenticacion exitosa.",
+      "user": {
+        "id": "<user-uuid>",
+        "tenant_id": "<tenant-uuid>"
+      },
+      "requires_registration": false,
+      "redirect": "/dashboard"
+    }
+    ```
+
+    **New user (no account found):**
+
+    ```json
+    {
+      "message": "Verificacion exitosa. Completa tu registro.",
+      "user": null,
+      "requires_registration": true,
+      "redirect": "/register"
+    }
+    ```
+  </Step>
+</Steps>
+
+## Generate OTP endpoint
+
+```
+POST /api/v1/otp/generate
+```
+
+**Middleware:** `throttle:api.otp-generation`, `idempotency`
+
+<ParamField body="identifier" type="string" required>
+  Email address or E.164 phone number (`+504...`). Maximum 255 characters.
+</ParamField>
+
+**Rate limiting:** The route applies both the `throttle:api.otp-generation` middleware (route-level) and an in-controller check that enforces a maximum of 3 generation attempts per identifier per hour. Exceeding the limit returns a validation error with a cooldown time in minutes.
+
+```php
+// In OtpController — per-identifier rate limit
+$this->enforceRateLimit($request, 'generate', 3);
+```
+
+## Verify OTP endpoint
+
+```
+POST /api/v1/otp/verify
+```
+
+**Middleware:** `throttle:api.verification`
+
+<ParamField body="uuid" type="string" required>
+  UUID of the OTP record, as stored after the generate call. Must be a valid UUID v4.
+</ParamField>
+
+<ParamField body="otp_code" type="string" required>
+  The 6-digit numeric code delivered to the user. Must be exactly 6 digits.
+</ParamField>
+
+**Rate limiting:** The controller enforces up to 5 verify attempts per identifier per hour. The `OtpEntity` also tracks attempt counts and invalidates the code once `max_attempts` is reached.
+
+```php
+// OtpEntity — domain-level attempt guard
+public function maxAttemptsExceeded(int $maxAttempts = 5): bool
+{
+    return $this->attempts >= $maxAttempts;
+}
+```
+
+## Error responses
+
+| Scenario | HTTP status | Error field |
+|----------|-------------|-------------|
+| Invalid identifier format | `422` | `identifier` |
+| Too many generate requests | `422` | `identifier` |
+| OTP code is wrong | `422` | `otp_code` |
+| OTP has expired | `422` | `otp_code` |
+| Too many verify attempts | `422` | `identifier` |
+
+## Security: maintenance commands
+
+Two Artisan commands handle OTP hygiene. Schedule both in `routes/console.php`.
+
+### `auth:clear-otps`
+
+Deletes OTP records that expired more than 1 hour ago:
+
+```bash
+php artisan auth:clear-otps
+```
+
+```php
+// ClearOtps.php
+$count = OneTimePassword::where('expires_at', '<', now()->subHour())->delete();
+```
+
+### `auth:prune-idempotency`
+
+Prunes old idempotency records from the `processed_commands` table using a chunked "nibbling" strategy to avoid gap locks:
+
+```bash
+php artisan auth:prune-idempotency --days=30 --chunk=1000
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--days` | `30` | Retain records created within this many days |
+| `--chunk` | `1000` | Batch size per deletion cycle |
+
+<Tip>
+Run `auth:clear-otps` hourly and `auth:prune-idempotency` daily to keep the database lean without impacting production traffic.
+</Tip>

@@ -1,0 +1,160 @@
+---
+title: "Web authentication"
+description: "Session-based authentication for the Inertia React UI, including registration, login, password reset, email verification, and profile management."
+---
+
+The web authentication layer uses Laravel's session guard with the `web` driver. All routes are rendered through Inertia, so the browser never receives a traditional full-page redirect from the auth endpoints — the React app handles the UI state.
+
+## Guards and session configuration
+
+The `web` guard is configured in `config/auth.php`:
+
+```php
+'guards' => [
+    'web' => [
+        'driver' => 'session',
+        'provider' => 'users',
+        'expire' => 120, // minutes
+    ],
+    'admin' => [
+        'driver' => 'session',
+        'provider' => 'admins', // Filament admin panel
+        'expire' => 60,
+    ],
+],
+```
+
+<Note>
+The `admin` guard uses a separate `FilamentUser` model and is reserved for the Filament admin panel (`/admin`). Standard tenant users authenticate through the `web` guard.
+</Note>
+
+## Routes
+
+All web auth routes are defined in `routes/auth.php` and loaded within the `/` prefix.
+
+### Guest-only routes
+
+These routes are wrapped in `middleware('guest')` — authenticated users are redirected away:
+
+| Method | Path | Named route | Controller action |
+|--------|------|-------------|-------------------|
+| `GET` | `/register` | `register` | `RegisteredUserController@create` |
+| `POST` | `/register` | — | `RegisteredUserController@store` |
+| `GET` | `/login` | `login` | `AuthenticatedSessionController@create` |
+| `POST` | `/login` | — | `AuthenticatedSessionController@store` |
+| `GET` | `/forgot-password` | `password.request` | `PasswordResetLinkController@create` |
+| `POST` | `/forgot-password` | `password.email` | `PasswordResetLinkController@store` |
+| `GET` | `/reset-password/{token}` | `password.reset` | `NewPasswordController@create` |
+| `POST` | `/reset-password` | `password.store` | `NewPasswordController@store` |
+
+### Authenticated-only routes
+
+These routes require `middleware('auth')`:
+
+| Method | Path | Named route | Description |
+|--------|------|-------------|-------------|
+| `GET` | `/verify-email` | `verification.notice` | Email verification prompt |
+| `GET` | `/verify-email/{id}/{hash}` | `verification.verify` | Verify email (signed URL, throttle 6/min) |
+| `POST` | `/email/verification-notification` | `verification.send` | Resend verification email (throttle 6/min) |
+| `GET` | `/confirm-password` | `password.confirm` | Confirm password prompt |
+| `POST` | `/confirm-password` | — | Confirm password action |
+| `PUT` | `/password` | `password.update` | Update password |
+| `GET` | `/profile` | `profile.edit` | Profile edit page |
+| `PATCH` | `/profile` | `profile.update` | Update profile |
+| `DELETE` | `/profile` | `profile.destroy` | Delete account |
+| `POST` | `/logout` | `logout` | Destroy session |
+
+## Registration flow
+
+<Steps>
+  <Step title="Display the form">
+    `GET /register` renders the `Auth/Register` Inertia page via `RegisteredUserController@create`.
+  </Step>
+  <Step title="Submit registration">
+    `POST /register` is handled by `RegisteredUserController@store`. The request is validated by `RegisterTenantRequest`, then a `RegisterTenantCommand` is dispatched through the command bus.
+
+    The command creates both the user and the associated tenant in a single atomic operation.
+
+    ```php
+    $command = new RegisterTenantCommand(
+        businessName: $request->validated('business_name'),
+        slug: Str::slug($request->validated('slug')),
+        ownerName: $request->validated('name'),
+        email: $request->validated('email'),
+        password: $request->validated('password'),
+        cityId: $cityId,
+        categoryId: $categoryId,
+        whatsapp: $request->validated('whatsapp'),
+        selectedPlan: $request->validated('selected_plan', 'free'),
+        idempotencyKey: $request->header('X-Idempotency-Key')
+    );
+    ```
+  </Step>
+  <Step title="Auto-login and redirect">
+    After successful registration, the user is logged in immediately and redirected to the Filament dashboard:
+
+    ```php
+    $user = User::where('email', $result->ownerEmail)->firstOrFail();
+    $this->auth->login($user);
+    return redirect()->route('filament.admin.pages.dashboard');
+    ```
+  </Step>
+</Steps>
+
+## Login flow
+
+<Steps>
+  <Step title="Display the form">
+    `GET /login` renders `Auth/Login` with `canResetPassword` and `status` props.
+  </Step>
+  <Step title="Authenticate">
+    `POST /login` delegates to `LoginRequest::authenticate()`. On success, the session is regenerated to prevent session fixation, and the user is redirected to their intended destination.
+
+    ```php
+    $request->authenticate();
+    $request->session()->regenerate();
+    return redirect()->intended(route('dashboard', absolute: false));
+    ```
+  </Step>
+  <Step title="Logout">
+    `POST /logout` invalidates the session and regenerates the CSRF token before redirecting to `/`.
+  </Step>
+</Steps>
+
+## Email verification
+
+The `User` model implements `MustVerifyEmail`. Laravel attaches a signed URL to the verification email. The verification route enforces both the `signed` middleware (tamper-proof URL) and `throttle:6,1` (6 attempts per minute).
+
+```php
+Route::get('verify-email/{id}/{hash}', VerifyEmailController::class)
+    ->middleware(['signed', 'throttle:6,1'])
+    ->name('verification.verify');
+```
+
+<Warning>
+Email verification is required before a tenant owner can access protected areas. The profile controller checks `$request->user() instanceof MustVerifyEmail` and surfaces a banner if verification is pending.
+</Warning>
+
+## Password reset
+
+Password reset tokens are stored in `password_reset_tokens` and expire after 60 minutes (configurable via `AUTH_PASSWORD_TIMEOUT`). A new token cannot be requested more than once per minute (`'throttle' => 60`).
+
+## Profile management
+
+The `ProfileController` delegates to two application-layer actions:
+
+- `UpdateUserProfileAction` — handles dirty email detection and saves changes.
+- `DeleteUserAction` — requires current password confirmation before deleting the account and invalidating the session.
+
+```php
+public function destroy(Request $request): RedirectResponse
+{
+    $request->validate(['password' => ['required', 'current_password']]);
+    $user = $request->user();
+    $this->auth->logout();
+    $this->deleteUserAction->execute($user);
+    $request->session()->invalidate();
+    $request->session()->regenerateToken();
+    return $this->redirector->to('/');
+}
+```

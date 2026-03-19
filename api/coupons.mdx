@@ -1,0 +1,174 @@
+---
+title: "Coupons"
+description: "Verify coupon codes, list available discounts, and manage cart coupon state."
+---
+
+## POST /api/v1/coupons/verify
+
+Validate a coupon code against a cart subtotal. Returns the discount details when the coupon is valid.
+
+**Middleware:** `throttle:api.verification`  
+**Authentication:** Not required
+
+### Request body
+
+<ParamField body="tenant_id" type="integer" required>
+  Numeric tenant ID to scope the coupon lookup.
+</ParamField>
+
+<ParamField body="code" type="string" required>
+  Coupon code string. Normalized to uppercase internally. Maximum 50 characters.
+</ParamField>
+
+<ParamField body="cart_subtotal" type="number" required>
+  Current cart subtotal used to evaluate minimum spend requirements. Must be ≥ 0.
+</ParamField>
+
+### Response `200 OK`
+
+Coupon is valid. Response shape is determined by the coupon domain validation result.
+
+<ResponseField name="valid" type="boolean">
+  Always `true` on a 200 response.
+</ResponseField>
+
+<ResponseField name="discount_amount" type="number">
+  Calculated discount to subtract from the cart subtotal.
+</ResponseField>
+
+<ResponseField name="coupon_type" type="string">
+  One of: `percentage`, `fixed`, `free_shipping`.
+</ResponseField>
+
+### Response `422 Unprocessable Entity`
+
+<ResponseField name="valid" type="boolean">
+  Always `false` on a 422 response.
+</ResponseField>
+
+<ResponseField name="error" type="string">
+  Human-readable error message.
+</ResponseField>
+
+<ResponseField name="error_code" type="string">
+  Machine-readable rejection code. One of: `not_found`, `expired`, `not_started`, `usage_limit`, `user_limit`, `min_spend`, `already_used`, `inactive`, `product_excluded`, `category_excluded`.
+</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://yourdomain.com/api/v1/coupons/verify \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"tenant_id": 1, "code": "BIENVENIDO20", "cart_subtotal": 150.00}'
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch('https://yourdomain.com/api/v1/coupons/verify', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+  body: JSON.stringify({
+    tenant_id: 1,
+    code: 'BIENVENIDO20',
+    cart_subtotal: 150.00,
+  }),
+});
+const result = await res.json();
+```
+
+</CodeGroup>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `422` | Missing or invalid fields |
+| `422` | Coupon not found, expired, usage limit reached, minimum spend not met |
+| `429` | Verification rate limit exceeded |
+
+---
+
+## GET /api/v1/coupons
+
+List all active public coupons for a tenant. Results are cached for 15 minutes.
+
+**Middleware:** `throttle:api`  
+**Authentication:** Not required
+
+### Query parameters
+
+<ParamField query="tenant_id" type="integer" required>
+  Numeric tenant ID. Returns `400` when absent or zero.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="success" type="boolean">
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="data" type="object[]">
+  Array of valid coupon objects.
+</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl "https://yourdomain.com/api/v1/coupons?tenant_id=1" \
+  -H "Accept: application/json"
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch(
+  'https://yourdomain.com/api/v1/coupons?tenant_id=1',
+  { headers: { 'Accept': 'application/json' } }
+);
+const { data } = await res.json();
+```
+
+</CodeGroup>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `400` | `tenant_id` missing or zero |
+
+---
+
+## POST /api/v1/checkout/validate-coupon
+
+Validate a coupon in the checkout context. Used during the checkout flow to apply discounts to a session cart.
+
+**Middleware:** `throttle:api.verification`  
+**Authentication:** Not required
+
+<Note>
+This endpoint is handled by the `CheckoutController`. It behaves identically to `POST /api/v1/coupons/verify` for validation purposes but operates within the checkout session context.
+</Note>
+
+---
+
+## POST /api/v1/checkout/remove-coupon
+
+Remove a previously applied coupon from the checkout session.
+
+**Middleware:** `throttle:api`  
+**Authentication:** Not required
+
+### Response `200 OK`
+
+Confirmation that the coupon was removed from the session.
+
+---
+
+## POST /api/v1/checkout/cart-summary
+
+Calculate and return a cart summary including subtotal, discounts, and total.
+
+**Middleware:** `throttle:api`  
+**Authentication:** Not required
+
+### Response `200 OK`
+
+Cart totals object with applied coupon discount if any.

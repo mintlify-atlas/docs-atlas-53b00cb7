@@ -1,0 +1,130 @@
+---
+title: "TypeScript types"
+description: "Auto-generated TypeScript type definitions derived from PHP enums and domain objects."
+---
+
+## Source file
+
+```
+resources/js/types/generated.d.ts
+```
+
+This file is **auto-generated** from the PHP codebase using [Spatie TypeScript Transformer](https://github.com/spatie/laravel-typescript-transformer). Do not edit it manually — changes will be overwritten on the next generation run.
+
+## Regenerating types
+
+```bash
+php artisan typescript:transform
+```
+
+Alternatively, generate types from the JSON schemas:
+
+```bash
+php artisan schema:generate-types
+```
+
+## Key generated types
+
+All types are declared inside the `App` namespace.
+
+### Auth
+
+```typescript
+App.Application.Auth.Enums.AuthStatus
+// "success" | "new_user" | "requires_2fa" | "requires_onboarding"
+```
+
+### Orders
+
+```typescript
+App.Domain.Sales.Enums.OrderStatus
+// "pending" | "confirmed" | "processing" | "ready" | "delivered" | "cancelled"
+```
+
+### Coupons
+
+```typescript
+App.DataTransferObjects.Marketing.CouponType
+// "percentage" | "fixed" | "free_shipping"
+
+App.DataTransferObjects.Marketing.CouponRejection
+// "not_found" | "expired" | "not_started" | "usage_limit" | "user_limit"
+// | "min_spend" | "already_used" | "inactive" | "product_excluded" | "category_excluded"
+```
+
+### Analytics
+
+```typescript
+App.Domain.Analytics.Enums.InteractionType
+// "whatsapp_click" | "call" | "location_view" | "cart_add"
+// | "social_share" | "conversion" | "purchase"
+```
+
+### Payments
+
+```typescript
+App.Enums.PaymentMethod
+// "cash" | "bank_transfer" | "card" | "pending"
+
+App.Domain.Billing.Enums.PaymentStatus
+// "pending" | "paid" | "rejected" | "review"
+
+App.Enums.TransactionStatus
+// "pending" | "processing" | "requires_action" | "completed" | "failed"
+// | "refunded" | "partially_refunded" | "disputed" | "cancelled"
+```
+
+### Products
+
+```typescript
+App.Enums.StockStatus
+// "in_stock" | "out_of_stock" | "on_backorder" | "low_stock"
+// | "discontinued" | "pre_order"
+```
+
+### Tenants
+
+```typescript
+App.Domain.TenantGovernance.Enums.TenantPlan
+// "semilla" | "pro"
+
+App.Domain.TenantGovernance.Enums.BusinessType
+// "retail" | "food" | "service" | "hybrid"
+
+App.Domain.TenantGovernance.Enums.Capability
+// "catalog_basic" | "checkout_basic" | "customer_directory" | ...
+```
+
+### Access control
+
+```typescript
+App.Domain.Access.Enums.Role
+// "owner" | "admin" | "manager" | "operator" | "viewer"
+
+App.Domain.Access.Enums.Permission
+// "tenant.view" | "tenant.update" | "settings.view" | "catalog.create" | ...
+```
+
+### Social providers
+
+```typescript
+App.Domain.Shared.Enums.ProviderName
+// "google" | "facebook" | "apple" | "github" | "linkedin"
+```
+
+## Using types in your frontend
+
+Import the namespace at the top of your TypeScript file or reference it globally via your `tsconfig.json`:
+
+```typescript
+// types/index.d.ts
+/// <reference path="../resources/js/types/generated.d.ts" />
+
+function handleOrder(status: App.Domain.Sales.Enums.OrderStatus) {
+  // status is fully typed
+}
+```
+
+<Tip>
+After adding a new PHP enum, run `php artisan typescript:transform` to keep the generated types in sync with the backend.
+</Tip>

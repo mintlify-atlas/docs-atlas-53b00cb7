@@ -1,0 +1,270 @@
+---
+title: "Push notifications"
+description: "Web Push notifications via VAPID keys and the laravel-notification-channels/webpush package."
+---
+
+Vito Business OS delivers push notifications to browsers and mobile home screens using the [Web Push protocol](https://www.rfc-editor.org/rfc/rfc8030) via the `laravel-notification-channels/webpush` package. Push notifications are delivered even when the browser tab is closed, as long as the user has granted permission.
+
+## How it works
+
+```
+User grants permission in browser
+    │
+    ▼
+Browser creates a PushSubscription (endpoint + keys)
+    │
+    ▼
+Frontend POSTs subscription to POST /api/v1/push-subscriptions
+    │
+    ▼
+Laravel stores subscription in push_subscriptions table (linked to User)
+    │
+    ▼
+Notification dispatched → WebPushChannel sends via VAPID-signed HTTP request
+    │
+    ▼
+Push service (browser vendor) delivers to device
+    │
+    ▼
+Service worker receives push event → displays notification
+```
+
+## VAPID key configuration
+
+VAPID (Voluntary Application Server Identification) keys authenticate your server with browser push services. Generate them once:
+
+```bash
+php artisan webpush:vapid
+```
+
+This command prints your public and private keys. Add them to `.env`:
+
+```env
+# Run: php artisan webpush:vapid
+VAPID_SUBJECT=mailto:admin@yourdomain.com
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_KEY=
+```
+
+<Warning>
+Never rotate VAPID keys in production without first deleting all existing push subscriptions. Existing subscriptions are tied to the old public key and will fail silently after a key change.
+</Warning>
+
+## The `HasPushSubscriptions` trait
+
+The `User` model uses the `HasPushSubscriptions` trait from the webpush package:
+
+```php
+// app/Models/User.php
+use NotificationChannels\WebPush\HasPushSubscriptions;
+
+class User extends Authenticatable
+{
+    use HasPushSubscriptions;
+    // ...
+}
+```
+
+This trait provides `updatePushSubscription()` and `deletePushSubscription()` methods used by the API controller, as well as the `pushSubscriptions` relationship used by the channel to deliver notifications.
+
+## Subscription API
+
+Two authenticated API endpoints manage subscriptions. Both require a valid Sanctum token.
+
+### Register a subscription
+
+```http
+POST /api/v1/push-subscriptions
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+    "endpoint": "https://fcm.googleapis.com/fcm/send/...",
+    "keys": {
+        "auth": "...",
+        "p256dh": "..."
+    },
+    "contentEncoding": "aesgcm"
+}
+```
+
+**Response:**
+
+```json
+{
+    "status": "success",
+    "message": "Web Push subscription updated."
+}
+```
+
+### Remove a subscription
+
+```http
+DELETE /api/v1/push-subscriptions
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+    "endpoint": "https://fcm.googleapis.com/fcm/send/..."
+}
+```
+
+**Response:**
+
+```json
+{
+    "status": "success",
+    "message": "Web Push subscription deleted."
+}
+```
+
+## Notifications that use Web Push
+
+<CardGroup cols={2}>
+  <Card title="NewOrderNotification" icon="bag-shopping">
+    Sent to tenant admins when a new order is placed. Channels: `database`, `mail`, `broadcast`, `WebPushChannel`. Payload includes order number, customer name, and formatted total.
+  </Card>
+  <Card title="ExportReadyNotification" icon="download">
+    Sent when a background export job completes. Channels: `database`, `broadcast`. The broadcast payload includes a signed download URL valid for 30 minutes.
+  </Card>
+  <Card title="ReportReadyNotification" icon="chart-bar">
+    Sent when a background report job finishes. Channels: `mail`, `database`. Includes a secure download URL with an expiry date.
+  </Card>
+  <Card title="SubscriptionExpiringNotification" icon="triangle-alert">
+    Triggered by a daily console command 72 hours before subscription expiry. Channels: `database`, `mail`. Links directly to the billing page.
+  </Card>
+</CardGroup>
+
+### Web Push payload example
+
+`NewOrderNotification` defines the push payload in `toWebPush()`:
+
+```php
+// app/Notifications/NewOrderNotification.php
+
+public function via(object $notifiable): array
+{
+    return ['database', 'mail', 'broadcast', WebPushChannel::class];
+}
+
+public function toWebPush(object $notifiable, $notification): WebPushMessage
+{
+    $formattedTotal = 'L. ' . number_format((float) ($this->order->total ?? 0), 2);
+    $orderUrl = url("/app/orders/{$this->order->id}");
+    $customerName = $this->order->customer_name ?? 'Cliente';
+
+    return (new WebPushMessage)
+        ->title('Nuevo pedido recibido')
+        ->icon('/favicon.ico')
+        ->body("{$this->order->order_number} de {$customerName} por {$formattedTotal}")
+        ->action('Abrir pedido', 'open_order')
+        ->data([
+            'url'      => $orderUrl,
+            'order_id' => $this->order->id,
+        ]);
+}
+```
+
+## Frontend subscription flow
+
+<Steps>
+  <Step title="Request browser permission">
+    Before creating a subscription, request notification permission from the user:
+
+    ```javascript
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+        console.warn('Push permission denied');
+        return;
+    }
+    ```
+  </Step>
+  <Step title="Subscribe via the service worker">
+    Use the VAPID public key (exposed via `VITE_VAPID_PUBLIC_KEY`) to create a `PushSubscription`:
+
+    ```javascript
+    const registration = await navigator.serviceWorker.ready;
+
+    const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(
+            import.meta.env.VITE_VAPID_PUBLIC_KEY
+        ),
+    });
+    ```
+
+    The `urlBase64ToUint8Array` helper converts the base64 public key to the `Uint8Array` format the Push API requires:
+
+    ```javascript
+    function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+        const base64 = (base64String + padding)
+            .replace(/-/g, '+')
+            .replace(/_/g, '/');
+        const rawData = atob(base64);
+        return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
+    }
+    ```
+  </Step>
+  <Step title="Send the subscription to the API">
+    POST the subscription object to your backend so Laravel can store and use it:
+
+    ```javascript
+    const subscriptionJson = subscription.toJSON();
+
+    await axios.post('/api/v1/push-subscriptions', {
+        endpoint:        subscriptionJson.endpoint,
+        keys:            subscriptionJson.keys,
+        contentEncoding: (PushManager.supportedContentEncodings || ['aesgcm'])[0],
+    });
+    ```
+  </Step>
+  <Step title="Handle push events in the service worker">
+    Your service worker (registered by `vite-plugin-pwa`) listens for the `push` event and shows the notification:
+
+    ```javascript
+    self.addEventListener('push', (event) => {
+        const data = event.data?.json() ?? {};
+
+        event.waitUntil(
+            self.registration.showNotification(data.title ?? 'Notificación', {
+                body:  data.body,
+                icon:  data.icon ?? '/icon-192x192.png',
+                data:  data.data,
+            })
+        );
+    });
+
+    self.addEventListener('notificationclick', (event) => {
+        event.notification.close();
+        const url = event.notification.data?.url;
+        if (url) {
+            event.waitUntil(clients.openWindow(url));
+        }
+    });
+    ```
+  </Step>
+  <Step title="Unsubscribe">
+    To remove a subscription (e.g., when the user disables notifications in settings):
+
+    ```javascript
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager.getSubscription();
+
+    if (subscription) {
+        await axios.delete('/api/v1/push-subscriptions', {
+            data: { endpoint: subscription.endpoint },
+        });
+        await subscription.unsubscribe();
+    }
+    ```
+  </Step>
+</Steps>
+
+## Browser support
+
+Web Push is supported in all modern browsers (Chrome, Firefox, Edge, Safari 16.4+). iOS Safari requires the app to be installed to the home screen before push notifications work.
+
+<Tip>
+Test your VAPID configuration locally using a tool like [web-push-testing-service](https://github.com/nicktindall/web-push-testing-service) or by checking the Laravel log (`LOG_CHANNEL=stack`) for push delivery errors.
+</Tip>

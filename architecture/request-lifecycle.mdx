@@ -1,0 +1,316 @@
+---
+title: "Request lifecycle"
+description: "The Golden Path for a write operation in Vito Business OS — from HTTP request to committed database state and dispatched domain event."
+---
+
+Every write operation in Vito Business OS follows a strict, unidirectional flow called **The Golden Path**. Ad-hoc shortcuts — Eloquent in a controller, SQL in a handler, business logic in a request — are blocked by CI.
+
+This page walks through the `RegisterUser` flow end to end, showing the actual code at each step.
+
+<Note>
+The Golden Path applies to all write operations. The exact classes differ per use case, but the sequence — Request → Command → Handler → Repository → Event → Result → Resource — never changes.
+</Note>
+
+## The flow at a glance
+
+```
+HTTP Request
+    ↓  validates syntax
+Form Request (toCommand)
+    ↓  typed DTO
+Controller
+    ↓  dispatches via CommandBus
+Application Handler
+    ├─ Repository (persist entity)
+    ├─ Outbox (append domain event)
+    └─ Returns Result DTO
+        ↓
+HTTP Resource (JSON serialization)
+    ↓
+Frontend (TypeScript types from generated.d.ts)
+```
+
+## Step-by-step walkthrough
+
+<Steps>
+  <Step title="HTTP layer — validate and build the Command">
+    `RegisterRequest` validates the raw input (required fields, email format, password confirmation). It contains a `toCommand()` factory that converts validated data into an immutable, typed Command DTO.
+
+    No business logic runs here. The request's job is syntax enforcement only.
+
+    ```php
+    // app/Http/Requests/Auth/RegisterRequest.php
+
+    final class RegisterRequest extends FormRequest
+    {
+        public function rules(): array
+        {
+            return [
+                'name'        => ['required', 'string', 'max:255'],
+                'email'       => ['required', 'string', 'email', 'max:255', 'unique:users'],
+                'password'    => ['required', 'confirmed', Password::defaults()],
+                'tenant_name' => ['nullable', 'string', 'max:255'],
+            ];
+        }
+
+        public function toCommand(): RegisterUserCommand
+        {
+            $validated = $this->validated();
+
+            $idempotencyKey = $this->header('X-Idempotency-Key')
+                ?? $this->input('idempotency_key');
+
+            return new RegisterUserCommand(
+                name:           $validated['name'],
+                email:          $validated['email'],
+                password:       $validated['password'],
+                tenantName:     $validated['tenant_name'] ?? null,
+                source:         'api_registration',
+                idempotencyKey: $idempotencyKey,
+                schemaVersion:  1,
+            );
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Controller — delegate to the Command Bus">
+    The controller receives a typed `RegisterTenantRequest`, calls `toCommand()`, and dispatches the Command via the `CommandBusInterface`. It never touches the database directly.
+
+    ```php
+    // app/Http/Controllers/Auth/RegisteredUserController.php
+
+    final class RegisteredUserController extends Controller
+    {
+        public function __construct(
+            private StatefulGuard $auth,
+            private LoggerInterface $logger,
+            private CommandBusInterface $bus,
+        ) {}
+
+        public function store(RegisterTenantRequest $request): RedirectResponse
+        {
+            $command = new RegisterTenantCommand(
+                businessName: $request->validated('business_name'),
+                email:        $request->validated('email'),
+                password:     $request->validated('password'),
+                // ...
+            );
+
+            /** @var RegisterTenantResult $result */
+            $result = $this->bus->dispatch($command);
+
+            $user = \App\Models\User::where('email', $result->ownerEmail)->firstOrFail();
+            $this->auth->login($user);
+
+            return redirect()->route('filament.admin.pages.dashboard');
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Application handler — orchestrate the use case">
+    `RegisterUserHandler` is the brain of the operation. It:
+    1. Guards against invalid state (staff registration requires a tenant ID)
+    2. Generates IDs and hashes the password **before** any persistence
+    3. Wraps everything in a database transaction
+    4. Constructs the Domain Entity via its factory method
+    5. Persists via the `UserRepositoryInterface` (a Port — no Eloquent here)
+    6. Appends a `UserRegistered` event to the outbox
+    7. Returns an immutable `RegisterUserResult` — no Eloquent models, no arrays
+
+    ```php
+    // app/Application/Identity/Handlers/RegisterUserHandler.php
+
+    final readonly class RegisterUserHandler implements RegisterUserHandlerInterface
+    {
+        public function __construct(
+            private UserRepositoryInterface $userRepository,
+            private TenantRepositoryInterface $tenantRepository,
+            private TransactionManagerInterface $transactionManager,
+            private OutboxRepositoryInterface $outboxRepository,
+            private PasswordHasherInterface $hasher,
+            private IdGeneratorInterface $idGenerator,
+            private SlugGeneratorInterface $slugGenerator,
+        ) {}
+
+        public function handle(RegisterUserCommand $command): RegisterUserResult
+        {
+            $userId = $this->idGenerator->generate();
+            $now    = new \DateTimeImmutable;
+
+            // Hash password before entering the transaction
+            $passwordHash = $this->hasher->hash($command->password);
+
+            return $this->transactionManager->transaction(
+                function () use ($command, $userId, $passwordHash, $now) {
+
+                    // Build the Domain Entity
+                    $user = UserEntity::register(
+                        uuid:         $userId,
+                        name:         $command->name,
+                        email:        $command->email,
+                        passwordHash: $passwordHash,
+                        role:         UserRole::TENANT_OWNER,
+                        tenantId:     $tenantId,
+                    );
+
+                    // Persist via Port (Repository Interface)
+                    $this->userRepository->save($user);
+
+                    // Append event to outbox — atomic with the transaction
+                    $event = new UserRegistered(
+                        user_id:    $userId,
+                        name:       $command->name,
+                        email:      new EncryptedEmail(Crypt::encryptString($command->email)),
+                        role:       UserRole::TENANT_OWNER->value,
+                        tenant_id:  $tenantId,
+                        occurredOn: $now,
+                    );
+                    $this->outboxRepository->append($event);
+
+                    // Return clean Result — no PII, no Eloquent
+                    return new RegisterUserResult(
+                        id:                  $userId,
+                        tenantId:            $tenantId,
+                        email:               $command->email,
+                        registeredAt:        $now,
+                        requiresVerification: true,
+                    );
+                }
+            );
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Repository — map entity to Eloquent and persist">
+    The Infrastructure repository is the only layer that touches Eloquent. It receives a Domain Entity, maps its fields to an Eloquent model, saves it, and maps the persisted model back to a Domain Entity before returning.
+
+    ```php
+    // app/Infrastructure/Repositories/Sales/EloquentOrderRepository.php
+    // (same pattern used for UserRepository)
+
+    final class EloquentOrderRepository implements OrderRepositoryInterface
+    {
+        public function save(OrderEntity $order): OrderEntity
+        {
+            $model = $order->id !== null
+                ? Order::query()->find($order->id)
+                    ?? throw OrderNotFoundException::withId($order->id)
+                : new Order;
+
+            foreach ($this->attributesForPersistence($order) as $attr => $value) {
+                $model->setAttribute($attr, $value);
+            }
+
+            $model->save();
+
+            // Always map back to Domain Entity — never leak Eloquent upward
+            return $this->toEntity($model->fresh(['items', 'tenant']));
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Outbox worker — dispatch the event after commit">
+    The `UserRegistered` event was appended to the outbox table inside the transaction. The `outbox:process` Artisan command runs every minute and dispatches pending events to the Laravel event bus **only after** the transaction is confirmed on disk.
+
+    This guarantees that no listener ever processes an event for a write that was rolled back.
+
+    ```php
+    // app/Infrastructure/Bus/TransactionalEventDispatcher.php
+
+    final readonly class TransactionalEventDispatcher implements EventDispatcherInterface
+    {
+        public function dispatch(object $event): void
+        {
+            // Write to outbox — atomic with the parent DB transaction
+            // Background worker reads this table and dispatches after commit
+            $this->outboxRepository->append($event);
+        }
+    }
+    ```
+
+    The `UserRegistered` domain event is declared `final readonly` and implements `ShouldDispatchAfterCommit`:
+
+    ```php
+    // app/Domain/Identity/Events/UserRegistered.php
+
+    final readonly class UserRegistered implements DomainEventInterface, ShouldDispatchAfterCommit
+    {
+        public function __construct(
+            public string $user_id,
+            public string $name,
+            public EncryptedEmail $email, // PII encrypted in transit
+            public string $role,
+            public string $tenant_id,
+            public DateTimeImmutable $occurredOn,
+        ) {}
+
+        public function toPayload(): array
+        {
+            return [
+                'schema_version' => 2,
+                'user_id'        => $this->user_id,
+                'name'           => $this->name,
+                'email'          => $this->email->value(),
+                'role'           => $this->role,
+                'tenant_id'      => $this->tenant_id,
+                'occurred_on'    => $this->occurredOn->format(\DateTimeInterface::ATOM),
+            ];
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="HTTP Resource — serialize the Result to JSON">
+    Back in the controller, the `RegisterUserResult` DTO is wrapped in an API Resource. The Resource serializes only the fields the client needs. No raw Eloquent, no internal state leaks.
+
+    ```php
+    // app/Http/Resources/V1/AuthResource.php
+
+    final class AuthResource extends JsonResource
+    {
+        public function toArray(Request $request): array
+        {
+            $resource = $this->resource;
+
+            return [
+                'user' => [
+                    'id'    => $resource->user->id ?? $resource->id,
+                    'name'  => $resource->user->name ?? $resource->name,
+                    'email' => $resource->user->email ?? $resource->email,
+                ],
+                'token'       => $resource->accessToken ?? $resource->token ?? null,
+                'redirect_to' => $resource->redirectUrl ?? '/dashboard',
+            ];
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Frontend — consume typed data">
+    The React component imports its props from `@/types/generated`, which is the TypeScript file generated by `php artisan typescript:transform`. The TypeScript compiler verifies that the component handles the exact shape the backend returns.
+
+    ```typescript
+    // resources/js/Pages/Auth/Register.tsx
+    import type { RegisterUserResult } from '@/types/generated';
+
+    // TypeScript compiler verifies the contract at build time
+    // npm run type-check will catch any drift between PHP and TypeScript
+    ```
+  </Step>
+</Steps>
+
+## What the Golden Path forbids
+
+| Anti-pattern | Why it is banned |
+|--------------|------------------|
+| Eloquent model returned from a Handler | Leaks persistence concerns into the Application layer |
+| Business logic in a Controller | Makes the HTTP delivery mechanism a decision-maker |
+| Validation in a Handler | Handlers assume input is already validated; mixing concerns breaks testability |
+| `dd()` or `ray()` committed to source | Debugging tools in production code are a deployment risk |
+| `['success' => true]` returned from a Handler | Untyped arrays break the contract — always return a Result DTO |
+| Eloquent model as a Command parameter | Commands must use primitives, lightweight Value Objects, or PHP enums |
+| Cross-module class instantiation | `Sales` must not `new Identity\UserEntity(...)` — use ports or events |

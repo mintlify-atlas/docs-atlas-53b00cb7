@@ -1,0 +1,212 @@
+---
+title: "Marketing"
+description: "Coupons, campaigns, announcements, lead capture, follower tracking, and interaction analytics for tenant growth."
+---
+
+The marketing module gives business owners tools to attract customers, reward them with promotions, and track the effectiveness of their digital presence.
+
+## Coupons
+
+The `Coupon` model (`app/Models/Coupon.php`) powers the promotional discount engine.
+
+### Discount types
+
+```php
+// app/Models/Coupon.php
+public const TYPE_FIXED        = 'fixed';        // Fixed amount off (e.g., L.50)
+public const TYPE_PERCENT      = 'percent';      // Percentage off (e.g., 10%)
+public const TYPE_FREE_SHIPPING = 'free_shipping'; // Waive delivery fee
+```
+
+### Key fields
+
+```php
+// app/Models/Coupon.php
+protected $fillable = [
+    'code',           // Auto-uppercased on save
+    'name', 'description',
+    'type', 'value',
+    'max_discount',   // Cap for percent coupons
+    'min_spend',      // Minimum cart subtotal required
+    'usage_limit',    // null = unlimited
+    'usage_count',
+    'starts_at', 'expires_at',
+    'is_active',
+    'restricted_to_categories', // JSON array
+    'restricted_to_products',   // JSON array
+];
+```
+
+### Validation
+
+`Coupon::validate()` returns a strongly-typed `CouponValidationResult` DTO:
+
+```php
+// app/Models/Coupon.php
+public function validate(float $cartSubtotal): CouponValidationResult
+{
+    if (!$this->is_active)          return CouponValidationResult::error('...', 'INACTIVE');
+    if ($this->starts_at && ...)    return CouponValidationResult::error('...', 'NOT_STARTED');
+    if ($this->expires_at && ...)   return CouponValidationResult::error('...', 'EXPIRED');
+    if ($this->usage_limit && ...)  return CouponValidationResult::error('...', 'DEPLETED');
+    if ($cartSubtotal < $this->min_spend) return CouponValidationResult::minSpendError(...);
+
+    return CouponValidationResult::success(
+        discountAmount: $this->calculateDiscount($cartSubtotal),
+        newTotal: $cartSubtotal - $discountAmount,
+        couponCode: $this->code,
+        couponType: $this->type,
+        couponValue: (float) $this->value,
+    );
+}
+```
+
+The API endpoint for coupon validation is:
+
+```
+POST /api/v1/checkout/validate-coupon
+POST /api/v1/checkout/remove-coupon
+```
+
+### Atomic usage tracking
+
+Coupon usage is incremented atomically with pessimistic locking to prevent over-redemption during high-traffic scenarios:
+
+```php
+// app/Models/Coupon.php
+public function incrementUsage(): bool
+{
+    return DB::transaction(function () {
+        $coupon = static::lockForUpdate()->find($this->id);
+        if ($coupon->usage_limit !== null && $coupon->usage_count >= $coupon->usage_limit) {
+            return false; // Depleted
+        }
+        $coupon->increment('usage_count');
+        return true;
+    });
+}
+```
+
+### Context-aware discounts
+
+`Coupon::calculateDiscountWithContext()` applies discounts only to eligible items when `restricted_to_categories` or `restricted_to_products` is set:
+
+- If both are null: all items are eligible.
+- If `restricted_to_products` is set: only matching product IDs are eligible.
+- If `restricted_to_categories` is set: only products in those categories are eligible.
+- If both are set: OR logic — match either restriction.
+
+## Campaigns
+
+The `Campaign` model manages outbound email campaigns to tenant followers.
+
+```php
+// app/Models/Campaign.php
+protected $fillable = [
+    'subject',
+    'content',
+    'type',
+    'audience_type',     // Cast to AudienceType enum
+    'status',
+    'scheduled_at',
+    'sent_at',
+    'recipients_count',
+];
+```
+
+Campaigns are sent via the campaign email job, which dispatches individual emails to the selected audience. The `AudienceType` enum (in `app/Domain/Marketing/Enums/`) controls recipient targeting.
+
+Manage campaigns in the Filament panel at `/app` via `CampaignResource`.
+
+## Announcements
+
+The `Announcement` model creates scheduled banners on the tenant microsite.
+
+```php
+// app/Models/Announcement.php — Types
+public const TYPE_INFO    = 'info';    // Blue
+public const TYPE_WARNING = 'warning'; // Yellow
+public const TYPE_PROMO   = 'promo';   // Green gradient
+public const TYPE_URGENT  = 'urgent';  // Red
+```
+
+Announcements have a scheduling window (`starts_at_utc`, `expires_at_utc`) stored in UTC. Active announcements are calculated with:
+
+```php
+// app/Models/Announcement.php
+public function scopeActive(Builder $query): Builder
+{
+    $nowUtc = CarbonImmutable::now('UTC');
+    return $query->where('is_active', true)
+        ->where(fn($q) => $q->whereNull('starts_at_utc')->orWhere('starts_at_utc', '<=', $nowUtc))
+        ->where(fn($q) => $q->whereNull('expires_at_utc')->orWhere('expires_at_utc', '>=', $nowUtc));
+}
+```
+
+All announcement content is sanitized via `getContentHtmlAttribute()` before rendering to prevent XSS.
+
+Announcement changes automatically invalidate the Inertia shared data cache.
+
+## Lead capture
+
+The `Lead` model captures customer inquiries from the public microsite.
+
+```php
+// app/Models/Lead.php
+protected $fillable = [
+    'product_id',        // Optional: linked product
+    'customer_name',
+    'customer_phone',    // Encrypted at rest
+    'message',           // Encrypted at rest
+    'status',
+];
+```
+
+Customer PII (`customer_phone`, `message`) is encrypted at rest using Laravel's `encrypted` cast for GDPR compliance.
+
+Leads are visible in the Filament panel under `Leads/` resources.
+
+## Follower system
+
+The `Follow` model implements a many-to-many relationship between users and tenants:
+
+```php
+// app/Models/Tenant.php
+public function followers()
+{
+    return $this->belongsToMany(User::class, 'follows')->withTimestamps();
+}
+```
+
+Followers are the primary audience for email campaigns. Toggle follow/unfollow via:
+
+```
+POST /follows/toggle   (requires auth)
+```
+
+The `FollowerResource` in the Filament panel shows the full follower list with counts.
+
+## Interaction tracking
+
+Three dedicated redirect routes record interactions before forwarding the user:
+
+```php
+// routes/web.php
+Route::prefix('track')->middleware('throttle:60,1')->group(function () {
+    Route::get('/wa/{tenant:slug}',   [InteractionController::class, 'whatsapp']);
+    Route::get('/call/{tenant:slug}', [InteractionController::class, 'call']);
+    Route::get('/maps/{tenant:slug}', [InteractionController::class, 'maps']);
+});
+```
+
+Each hit is recorded as an `Interaction` (type: `whatsapp_click`, `call_click`, `maps_click`) and counted toward the tenant's analytics dashboard. Rate-limited to 60 requests per minute per IP.
+
+## Marketing workspace routes
+
+The authenticated workspace exposes marketing management:
+
+```
+GET  /workspace/marketing              Marketing overview
+POST /workspace/marketing/coupons      Create coupon
+PUT  /workspace/marketing/coupons/{id}/toggle  Toggle coupon active state
+```

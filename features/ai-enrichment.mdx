@@ -1,0 +1,150 @@
+---
+title: "AI Enrichment"
+description: "AI-powered business profile optimization with budget enforcement, credit tracking, and a full audit log of AI consumption."
+---
+
+The AI Enrichment module uses a language model to improve tenant business profiles — generating better descriptions, SEO titles, slogans, and tags. Budget limits cap usage per tenant and an audit trail records every AI operation.
+
+<Warning>
+Each tenant has a fixed AI token/credit budget. Once the budget is exhausted, further AI enrichment requests are rejected until the budget is replenished. Monitor usage in the admin panel.
+</Warning>
+
+## API endpoints
+
+### Optimize profile
+
+```
+POST /api/v1/ai/optimize-profile
+```
+
+Triggers asynchronous profile enrichment for the authenticated tenant. The request is validated, a budget check is performed, and an AI enrichment job is dispatched to the queue.
+
+Required middleware: `auth:sanctum`, `tenant.ownership`
+
+### Generate content
+
+```
+POST /api/v1/ai/generate
+```
+
+Generates specific AI content (e.g., a product description) without applying it directly to the profile. Used for inline generation in the workspace.
+
+## The enrichment flow
+
+<Steps>
+  <Step title="Request validation">
+    The API controller validates the request and checks the tenant's remaining AI budget. Suspended (`canceled`, `past_due`) and archived (soft-deleted) tenants are rejected.
+
+    ```php
+    // app/Models/Tenant.php
+    public function applyAiEnhancement(array $enhancedData, bool $allowReEnhancement = false): void
+    {
+        if ($this->subscription_status === 'canceled' || $this->subscription_status === 'past_due') {
+            throw TenantDomainException::cannotEnhanceSuspendedProfile();
+        }
+        if ($this->trashed()) {
+            throw TenantDomainException::cannotEnhanceArchivedProfile();
+        }
+        if ($this->user_id === null) {
+            throw TenantDomainException::cannotEnhanceWithoutOwner();
+        }
+        if ($this->is_ai_enhanced && !$allowReEnhancement) {
+            throw TenantDomainException::alreadyEnhanced();
+        }
+    }
+    ```
+  </Step>
+  <Step title="Prompt construction">
+    The `BusinessProfilePromptRequest` DTO encapsulates the prompt content and optional model configuration:
+
+    ```php
+    // app/Domain/AIEnrichment/Data/BusinessProfilePromptRequest.php
+    final readonly class BusinessProfilePromptRequest
+    {
+        public function __construct(
+            public string $content,
+            public array $config = [] // temperature, max_tokens, etc.
+        ) {}
+    }
+    ```
+
+    Prompt templates live in `app/Domain/AIEnrichment/Prompts/`.
+  </Step>
+  <Step title="Job dispatch">
+    The AI enrichment job is dispatched to the queue. It calls the configured AI provider, tracks token consumption, and writes the result back to the tenant profile.
+  </Step>
+  <Step title="Profile update">
+    The job applies the AI-generated fields to the `Tenant` model. Only non-empty values are applied:
+
+    ```php
+    // app/Models/Tenant.php
+    private function applyEnrichedFields(array $enhancedData): array
+    {
+        $applied = [];
+        foreach (['description', 'seo_title', 'seo_description', 'slogan'] as $field) {
+            if (!empty($enhancedData[$field])) {
+                $this->$field = $enhancedData[$field];
+                $applied[] = $field;
+            }
+        }
+        if (!empty($enhancedData['tags']) && is_array($enhancedData['tags'])) {
+            $this->tags = $enhancedData['tags'];
+            $applied[] = 'tags';
+        }
+        return $applied;
+    }
+    ```
+
+    Fields that can be enriched: `description`, `seo_title`, `seo_description`, `tags`, `slogan`.
+  </Step>
+  <Step title="Event recording">
+    On successful enrichment, a `TenantProfileEnhanced` domain event is recorded via the `HasDomainEvents` trait:
+
+    ```php
+    // app/Models/Tenant.php
+    $this->is_ai_enhanced = true;
+    $this->record(new TenantProfileEnhanced(
+        tenant_id:      (string) $this->id,
+        user_id:        (string) $this->user_id,
+        occurredAt:     now()->toDateTimeImmutable(),
+        enhanced_fields: $enhancedFields
+    ));
+    ```
+  </Step>
+</Steps>
+
+## Budget enforcement
+
+AI budget is enforced at the application layer before any prompt is sent to the model provider. The budget system tracks credit/token consumption per tenant:
+
+- Each API call consumes a configurable number of credits.
+- When the remaining budget reaches zero, the endpoint returns a `402 Payment Required` or `403 Forbidden` response depending on configuration.
+- Budget can be replenished by the super admin from `/admin`.
+- The `is_ai_enhanced` flag on `Tenant` prevents re-enrichment by default unless `allowReEnhancement = true` is passed.
+
+<Warning>
+Budget limits apply per tenant, not per user. All members of a tenant share the same AI credit pool. Coordinate with the super admin to increase limits for high-volume tenants.
+</Warning>
+
+## Audit log
+
+All AI consumption is recorded via Spatie Activitylog under a dedicated log name. Each log entry includes:
+
+- Tenant ID
+- User who triggered the request
+- Fields that were modified
+- Token count consumed (when the provider returns usage metadata)
+- Timestamp
+
+The `TenantProfileEnhanced` domain event feeds into the outbox for reliable downstream processing (reporting, billing hooks).
+
+Audit entries are visible in the super admin panel at `/admin` under Activity Logs, filtered by the `ai-enrichment` log name.
+
+## Domain invariants
+
+| Condition | Result |
+|---|---|
+| Subscription `canceled` or `past_due` | `TenantDomainException::cannotEnhanceSuspendedProfile()` |
+| Tenant is soft-deleted | `TenantDomainException::cannotEnhanceArchivedProfile()` |
+| No owner assigned (`user_id = null`) | `TenantDomainException::cannotEnhanceWithoutOwner()` |
+| Already enhanced (`is_ai_enhanced = true`) | `TenantDomainException::alreadyEnhanced()` unless `allowReEnhancement = true` |

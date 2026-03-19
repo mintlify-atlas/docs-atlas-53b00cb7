@@ -1,0 +1,377 @@
+---
+title: "Deployment"
+description: "Server requirements, Nginx configuration, Supervisor processes, and deployment steps for Vito Business OS."
+---
+
+## Server Requirements
+
+| Component | Minimum Version |
+|---|---|
+| OS | Ubuntu 22.04 LTS or 24.04 LTS |
+| PHP | 8.2+ (with extensions below) |
+| Web Server | Nginx |
+| Database | MySQL 8.0+ or MariaDB 10.6+ |
+| Cache / Queue | Redis 6+ |
+| Process Manager | Supervisor |
+| Node.js | 18+ LTS |
+
+**Required PHP extensions:** `php8.2-fpm`, `php8.2-mysql`, `php8.2-redis`, `php8.2-gd`, `php8.2-curl`, `php8.2-mbstring`, `php8.2-xml`, `php8.2-zip`, `php8.2-bcmath`, `php8.2-intl`
+
+## Initial Server Setup
+
+Install system dependencies on Ubuntu:
+
+```bash
+sudo apt update && sudo apt upgrade -y
+
+sudo apt install -y \
+    nginx \
+    supervisor \
+    redis-server \
+    nodejs npm \
+    git \
+    certbot python3-certbot-nginx
+
+# Install PHP 8.2 (Ondrej PPA)
+sudo add-apt-repository ppa:ondrej/php -y
+sudo apt install -y \
+    php8.2-fpm \
+    php8.2-mysql \
+    php8.2-redis \
+    php8.2-gd \
+    php8.2-curl \
+    php8.2-mbstring \
+    php8.2-xml \
+    php8.2-zip \
+    php8.2-bcmath \
+    php8.2-intl
+
+# Install Composer
+curl -sS https://getcomposer.org/installer | php
+sudo mv composer.phar /usr/local/bin/composer
+```
+
+## Deployment Steps
+
+The `devops/deploy.sh` script performs an atomic deployment with fail-fast error handling. Run it as `www-data` or `deployer`:
+
+```bash
+cd /var/www/conecta-hn
+sudo -u www-data ./devops/deploy.sh
+```
+
+Optional flags:
+
+```bash
+# Skip frontend asset compilation (faster when no UI changes)
+./devops/deploy.sh --skip-assets
+
+# Skip pre-deployment database backup
+./devops/deploy.sh --no-backup
+```
+
+The script executes these phases in order:
+
+<Steps>
+  <Step title="Pre-flight checks">
+    Verifies the application directory exists, confirms the process is running as an authorized user (`www-data`, `deployer`, or `root`), and validates the Git repository.
+  </Step>
+
+  <Step title="Backup (optional)">
+    Creates a timestamped database backup at `/var/backups/conecta-hn/db_YYYYMMDD_HHMMSS.sql.gz`. Retains the last 7 backups. Skip with `--no-backup`.
+  </Step>
+
+  <Step title="Maintenance mode">
+    Activates Laravel maintenance mode: `php artisan down --render="errors::503" --retry=60`
+  </Step>
+
+  <Step title="Code synchronization">
+    Fetches and hard-resets to `origin/main`:
+    ```bash
+    git fetch origin main --quiet
+    git reset --hard origin/main
+    ```
+  </Step>
+
+  <Step title="PHP dependencies">
+    Installs production Composer dependencies:
+    ```bash
+    composer install \
+        --no-dev \
+        --optimize-autoloader \
+        --prefer-dist \
+        --no-interaction
+    ```
+  </Step>
+
+  <Step title="Database migrations">
+    Runs pending migrations:
+    ```bash
+    php artisan migrate --force --no-interaction
+    ```
+  </Step>
+
+  <Step title="Cache optimization">
+    Clears and rebuilds all Laravel caches:
+    ```bash
+    php artisan optimize:clear
+    php artisan config:cache
+    php artisan route:cache
+    php artisan view:cache
+    php artisan event:cache
+    php artisan filament:cache-components
+    ```
+  </Step>
+
+  <Step title="Frontend assets">
+    Compiles Vite assets (skip with `--skip-assets`):
+    ```bash
+    npm ci --silent --prefer-offline
+    npm run build
+    ```
+  </Step>
+
+  <Step title="Service reload">
+    Reloads PHP-FPM gracefully, signals queue workers to restart after their current job, and restarts the Reverb WebSocket server:
+    ```bash
+    sudo systemctl reload php8.2-fpm
+    php artisan queue:restart
+    php artisan reverb:restart
+    ```
+  </Step>
+
+  <Step title="Health check and go live">
+    Verifies Laravel and database connectivity, then deactivates maintenance mode:
+    ```bash
+    php artisan --version
+    php artisan up
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+Set the `SLACK_DEPLOY_WEBHOOK` environment variable to receive deployment success/failure notifications in Slack.
+</Tip>
+
+## First-Time Setup
+
+Before running `deploy.sh` for the first time:
+
+```bash
+# Clone and set permissions
+sudo mkdir -p /var/www
+sudo git clone https://github.com/your-org/conecta-hn.git /var/www/conecta-hn
+sudo chown -R www-data:www-data /var/www/conecta-hn
+
+# Bootstrap the application
+cd /var/www/conecta-hn
+sudo -u www-data composer install --no-dev --optimize-autoloader
+sudo -u www-data cp .env.example .env
+sudo -u www-data php artisan key:generate
+# Edit .env with production values, then:
+sudo -u www-data php artisan migrate --force
+sudo -u www-data php artisan storage:link
+
+# Install SSL
+sudo certbot --nginx -d yourdomain.com -d www.yourdomain.com
+
+# Create deploy log
+sudo touch /var/log/conecta-deploy.log
+sudo chown www-data:www-data /var/log/conecta-deploy.log
+```
+
+## Nginx Configuration
+
+Copy `devops/nginx_app.conf` to `/etc/nginx/sites-available/conecta-hn`, update `server_name` and SSL paths, then enable it:
+
+```bash
+sudo cp devops/nginx_app.conf /etc/nginx/sites-available/conecta-hn
+sudo ln -s /etc/nginx/sites-available/conecta-hn /etc/nginx/sites-enabled/
+sudo rm /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Key sections of the configuration:
+
+```nginx
+# Rate limiting zones (DDoS protection)
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=60r/m;
+limit_req_zone $binary_remote_addr zone=login_limit:10m rate=10r/m;
+
+server {
+    listen 443 ssl http2;
+    server_name yourdomain.com www.yourdomain.com;
+    root /var/www/conecta-hn/public;
+
+    # Modern TLS only
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # OWASP security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Block sensitive paths
+    location ~ /\.env { deny all; return 404; }
+    location ~ /\.git { deny all; return 404; }
+    location ~ ^/(storage|vendor)/ { deny all; return 404; }
+    location = /artisan { deny all; return 404; }
+
+    # Vite assets — cache forever (hashed filenames)
+    location /build/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # API rate limiting
+    location ~ ^/api/ {
+        limit_req zone=api_limit burst=20 nodelay;
+        limit_req_status 429;
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    # WebSocket proxy for Laravel Reverb
+    location /app {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400s;
+    }
+
+    # PHP-FPM handler
+    location ~ \.php$ {
+        fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_read_timeout 300s;
+        fastcgi_hide_header X-Powered-By;
+    }
+}
+```
+
+<Note>
+The `/app` location block proxies WebSocket upgrade requests to Reverb on port 8080. This is required for real-time features. Ensure Reverb is running via Supervisor (see below).
+</Note>
+
+## Supervisor Configuration
+
+Copy `devops/conecta-worker.conf` to `/etc/supervisor/conf.d/` and apply it:
+
+```bash
+sudo cp devops/conecta-worker.conf /etc/supervisor/conf.d/
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl start conecta:*
+```
+
+The configuration defines four managed processes:
+
+```ini
+; Default queue worker — 2 processes for parallel job execution
+[program:conecta-worker]
+process_name=%(program_name)s_%(process_num)02d
+command=php /var/www/conecta-hn/artisan queue:work redis \
+    --sleep=3 --tries=3 --max-time=3600 --max-jobs=1000 --memory=256
+user=www-data
+numprocs=2
+autostart=true
+autorestart=true
+stdout_logfile=/var/www/conecta-hn/storage/logs/worker.log
+
+; High-priority queue worker — processes 'high' queue before 'default'
+[program:conecta-worker-high]
+process_name=%(program_name)s_%(process_num)02d
+command=php /var/www/conecta-hn/artisan queue:work redis \
+    --queue=high,default --sleep=1 --tries=5 --max-time=3600 --max-jobs=500 --memory=256
+user=www-data
+numprocs=1
+
+; Laravel scheduler daemon — alternative to cron for containerized environments
+[program:conecta-scheduler]
+command=php /var/www/conecta-hn/artisan schedule:work
+user=www-data
+numprocs=1
+
+; Reverb WebSocket server — real-time broadcasting on port 8080
+[program:conecta-reverb]
+command=php /var/www/conecta-hn/artisan reverb:start --host=127.0.0.1 --port=8080
+user=www-data
+numprocs=1
+stdout_logfile=/var/www/conecta-hn/storage/logs/reverb.log
+
+; Group all processes for easy management
+[group:conecta]
+programs=conecta-worker,conecta-worker-high,conecta-scheduler,conecta-reverb
+```
+
+<Note>
+The `conecta-scheduler` program runs `schedule:work`, which is a long-running daemon. Use it **or** the cron entry below — not both. The Supervisor approach is preferred in containerized or non-cron environments.
+</Note>
+
+Monitor workers:
+
+```bash
+sudo supervisorctl status conecta:*
+sudo supervisorctl tail -f conecta-worker:*
+tail -f /var/www/conecta-hn/storage/logs/worker.log
+```
+
+## Environment Variables for Production
+
+Critical `.env` values for a production deployment:
+
+```env
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=https://yourdomain.com
+
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=conecta_hn
+DB_USERNAME=conecta
+DB_PASSWORD=<strong-password>
+
+SESSION_DRIVER=redis
+QUEUE_CONNECTION=redis
+BROADCAST_CONNECTION=reverb
+CACHE_STORE=database
+
+REDIS_CLIENT=phpredis
+REDIS_HOST=127.0.0.1
+REDIS_PASSWORD=null
+REDIS_PORT=6379
+
+PAYMENT_WEBHOOK_SECRET=<your-webhook-secret>
+```
+
+<Warning>
+Never commit `.env` to version control. The `APP_DEBUG=false` setting is required in production — leaving it `true` exposes stack traces and environment data in HTTP error responses.
+</Warning>
+
+## S3 Media Storage
+
+Vito Business OS supports S3-compatible object storage for media uploads. Configure the following variables:
+
+```env
+FILESYSTEM_DISK=s3
+
+AWS_ACCESS_KEY_ID=<key-id>
+AWS_SECRET_ACCESS_KEY=<secret-key>
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=your-bucket-name
+AWS_USE_PATH_STYLE_ENDPOINT=false
+```
+
+Media uploads use **pre-signed S3 URLs** so files are uploaded directly from the client to S3 — they are never proxied through the application server. This keeps the web worker free of large binary transfers.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| 502 Bad Gateway | PHP-FPM not running | `sudo systemctl restart php8.2-fpm` |
+| Jobs not processing | Workers stopped | `sudo supervisorctl restart conecta:*` |
+| Permission errors | Wrong file ownership | `sudo chown -R www-data:www-data storage bootstrap/cache` |
+| WebSockets not connecting | Reverb not running | `sudo supervisorctl restart conecta-reverb` |

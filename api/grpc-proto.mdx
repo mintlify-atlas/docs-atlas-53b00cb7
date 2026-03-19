@@ -1,0 +1,94 @@
+---
+title: "gRPC proto"
+description: "Protocol Buffer definition for the Identity service used in service-to-service communication."
+---
+
+## Proto file location
+
+```
+proto/identity/service.proto
+```
+
+## Use case
+
+The `IdentityService` is used for **service-to-service identity verification** — for example, when another internal microservice or worker needs to register a user without going through the HTTP API. This is separate from the public REST API and is not exposed to external clients.
+
+## Proto definition
+
+```protobuf proto/identity/service.proto
+syntax = "proto3";
+
+package identity.v1;
+
+option php_namespace = "App\\Infrastructure\\Identity\\Delivery\\Grpc\\Generated";
+
+// IdentityService - The Binary Highway
+// STRICT CONTRACT: Changes here require versioning.
+service IdentityService {
+  rpc RegisterUser (RegisterUserRequest) returns (RegisterUserResponse);
+}
+
+message RegisterUserRequest {
+  string email = 1;
+  string password = 2;
+  string role = 3;
+  string tenant_id = 4;
+  string name = 5;
+}
+
+message RegisterUserResponse {
+  string user_id = 1;
+  // Status: "registered", "pending_verification", etc.
+  string status = 2;
+}
+```
+
+## Service definition
+
+### `RegisterUser`
+
+Registers a new user in the identity system.
+
+**Request: `RegisterUserRequest`**
+
+| Field | Type | Field number | Description |
+|-------|------|-------------|-------------|
+| `email` | string | 1 | User email address |
+| `password` | string | 2 | Plain-text password (transmitted over encrypted channel) |
+| `role` | string | 3 | User role (e.g. `owner`, `staff`) |
+| `tenant_id` | string | 4 | UUID of the tenant to associate the user with |
+| `name` | string | 5 | Display name |
+
+**Response: `RegisterUserResponse`**
+
+| Field | Type | Field number | Description |
+|-------|------|-------------|-------------|
+| `user_id` | string | 1 | UUID of the newly created user |
+| `status` | string | 2 | Registration status: `registered`, `pending_verification`, etc. |
+
+## PHP generated namespace
+
+Generated PHP classes are placed in:
+
+```
+App\Infrastructure\Identity\Delivery\Grpc\Generated
+```
+
+The `php_namespace` option in the proto file maps to this namespace.
+
+## Versioning
+
+<Warning>
+The proto file uses `package identity.v1`. Any breaking changes to message fields or the service definition require a new package version (e.g. `identity.v2`). Do not remove or renumber existing fields — mark them as `reserved` instead.
+</Warning>
+
+## Generating PHP stubs
+
+After modifying the proto file, regenerate the PHP stubs:
+
+```bash
+protoc --php_out=app/Infrastructure/Identity/Delivery/Grpc/Generated \
+       --grpc_out=app/Infrastructure/Identity/Delivery/Grpc/Generated \
+       --plugin=protoc-gen-grpc=$(which grpc_php_plugin) \
+       proto/identity/service.proto
+```

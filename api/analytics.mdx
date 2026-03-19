@@ -1,0 +1,212 @@
+---
+title: "Analytics"
+description: "Track page views, interactions, and conversion events for tenant storefronts."
+---
+
+<Note>
+All analytics endpoints are public — no authentication is required. Events are accepted asynchronously and processed in the background. The API returns `202 Accepted` or `201 Created` to avoid blocking the caller.
+</Note>
+
+## POST /api/v1/analytics/track
+
+Track a generic analytics event for a specific tenant and interaction type.
+
+**Middleware:** `throttle:api`  
+**Authentication:** Not required
+
+### Request body
+
+<ParamField body="tenant_id" type="string" required>
+  UUID or string ID of the tenant to associate the event with.
+</ParamField>
+
+<ParamField body="type" type="string" required>
+  Interaction type. Must be one of the `InteractionType` enum values: `whatsapp_click`, `call`, `location_view`, `cart_add`, `social_share`, `conversion`, `purchase`.
+</ParamField>
+
+<ParamField body="product_id" type="integer">
+  Optional. If provided, must exist in the `products` table. The product ID is also merged into `metadata`.
+</ParamField>
+
+<ParamField body="metadata" type="object">
+  Arbitrary key-value metadata to attach to the event.
+</ParamField>
+
+### Response `202 Accepted`
+
+<ResponseField name="success" type="boolean">`true`</ResponseField>
+<ResponseField name="message" type="string">`Event accepted for processing`</ResponseField>
+
+### Response `404 Not Found`
+
+Returned when the `tenant_id` does not correspond to a public (active) tenant.
+
+<ResponseField name="success" type="boolean">`false`</ResponseField>
+<ResponseField name="message" type="string">`Tenant not found or not available`</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://yourdomain.com/api/v1/analytics/track \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{
+    "tenant_id": "a1b2c3d4-...",
+    "type": "whatsapp_click",
+    "product_id": 101,
+    "metadata": {"source": "catalog_page"}
+  }'
+```
+
+```typescript TypeScript (fetch)
+const res = await fetch('https://yourdomain.com/api/v1/analytics/track', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+  body: JSON.stringify({
+    tenant_id: 'a1b2c3d4-...',
+    type: 'whatsapp_click',
+    product_id: 101,
+    metadata: { source: 'catalog_page' },
+  }),
+});
+```
+
+</CodeGroup>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `404` | Tenant not found or not public |
+| `422` | `tenant_id` or `type` missing, invalid interaction type |
+
+---
+
+## POST /api/v1/analytics/conversion
+
+Record a purchase/conversion beacon event. Designed to be called from a client-side beacon (e.g. after a payment confirmation). Failures are swallowed silently to avoid disrupting the user flow.
+
+**Middleware:** `throttle:api`  
+**Authentication:** Not required
+
+### Request body
+
+<ParamField body="tenant_slug" type="string" required>
+  URL slug of the tenant. Used to resolve the tenant without exposing internal IDs.
+</ParamField>
+
+<ParamField body="transaction_id" type="string">
+  Unique transaction identifier from the payment system.
+</ParamField>
+
+<ParamField body="value" type="number">
+  Order/transaction value. Defaults to `0.0`.
+</ParamField>
+
+<ParamField body="currency" type="string">
+  ISO 4217 currency code. Defaults to `HNL`.
+</ParamField>
+
+<ParamField body="event" type="string">
+  Event type. Defaults to the `purchase` interaction type.
+</ParamField>
+
+<ParamField body="timestamp" type="string">
+  ISO 8601 timestamp of the original event. Defaults to server time when omitted.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="status" type="string">`ok` on success, `skipped` when tenant not found or slug missing.</ResponseField>
+<ResponseField name="transaction_id" type="string">Echoed back from the request.</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://yourdomain.com/api/v1/analytics/conversion \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{
+    "tenant_slug": "mi-negocio",
+    "transaction_id": "txn_abc123",
+    "value": 150.00,
+    "currency": "HNL"
+  }'
+```
+
+```typescript TypeScript (fetch)
+await fetch('https://yourdomain.com/api/v1/analytics/conversion', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+  body: JSON.stringify({
+    tenant_slug: 'mi-negocio',
+    transaction_id: 'txn_abc123',
+    value: 150.00,
+    currency: 'HNL',
+  }),
+});
+```
+
+</CodeGroup>
+
+---
+
+## POST /api/v1/interactions
+
+Record a low-level interaction event (view, WhatsApp click, call, maps click). This endpoint uses the `tenant-aware` throttle group rather than the general `api` group.
+
+**Middleware:** `throttle:tenant-aware`  
+**Authentication:** Not required
+
+<Warning>
+Do not use this endpoint to enumerate tenants. Invalid tenant IDs are silently accepted with a `202` response — no tenant existence feedback is given.
+</Warning>
+
+### Request body
+
+<ParamField body="tenant_id" type="integer" required>
+  Numeric tenant ID.
+</ParamField>
+
+<ParamField body="type" type="string" required>
+  Event type. Allowed values: `view`, `whatsapp_click`, `call_click`, `maps_click`.
+</ParamField>
+
+<ParamField body="product_id" type="integer">
+  Optional product ID associated with the interaction.
+</ParamField>
+
+<ParamField body="metadata" type="object">
+  Arbitrary metadata object.
+</ParamField>
+
+### Response `201 Created` / `202 Accepted`
+
+`201` when the interaction is successfully recorded. `202` when the tenant does not exist (silent acceptance) or on processing errors.
+
+<ResponseField name="status" type="string">`success`, `accepted`.</ResponseField>
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://yourdomain.com/api/v1/interactions \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"tenant_id": 1, "type": "view"}'
+```
+
+```typescript TypeScript (fetch)
+await fetch('https://yourdomain.com/api/v1/interactions', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+  body: JSON.stringify({ tenant_id: 1, type: 'view' }),
+});
+```
+
+</CodeGroup>
+
+### Error responses
+
+| Status | Cause |
+|--------|-------|
+| `422` | Missing `tenant_id` or `type`, or `type` not in the allowed list |
