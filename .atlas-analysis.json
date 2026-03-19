@@ -1,0 +1,157 @@
+{
+  "projectType": "saas",
+  "projectName": "Vito Business OS",
+  "projectDescription": "An open-source multi-tenant SaaS platform built on Laravel, React, and Filament to empower small and medium businesses in developing regions with catalogs, orders, bookings, marketing, and analytics.",
+  "theme": "maple",
+  "primaryColor": "#6366f1",
+  "lightColor": "#e0e7ff",
+  "darkColor": "#3730a3",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/modular-monolith",
+              "architecture/bounded-contexts",
+              "architecture/request-lifecycle"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/multi-tenancy",
+              "features/catalog",
+              "features/orders",
+              "features/bookings",
+              "features/marketing",
+              "features/loyalty",
+              "features/analytics",
+              "features/ai-enrichment"
+            ]
+          },
+          {
+            "group": "Authentication",
+            "pages": [
+              "auth/overview",
+              "auth/web-auth",
+              "auth/api-auth",
+              "auth/otp",
+              "auth/social-login",
+              "auth/roles-permissions"
+            ]
+          },
+          {
+            "group": "Admin Panels",
+            "pages": [
+              "panels/tenant-panel",
+              "panels/super-admin-panel"
+            ]
+          },
+          {
+            "group": "Realtime & Notifications",
+            "pages": [
+              "realtime/broadcasting",
+              "realtime/push-notifications",
+              "realtime/pwa"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/deployment",
+              "operations/scheduler",
+              "operations/queues-jobs",
+              "operations/health-checks",
+              "operations/security"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview",
+              "api/authentication",
+              "api/rate-limiting"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/auth",
+              "api/products",
+              "api/orders",
+              "api/coupons",
+              "api/analytics",
+              "api/ai",
+              "api/notifications",
+              "api/reports"
+            ]
+          },
+          {
+            "group": "Contracts",
+            "pages": [
+              "api/json-schemas",
+              "api/typescript-types",
+              "api/grpc-proto",
+              "api/webhooks"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-tenant architecture with path-based and subdomain routing",
+    "Product catalog with menu sections, modifiers, and media",
+    "Order management with real-time status updates and PDF receipts",
+    "Booking and appointment system with service providers and reminders",
+    "Marketing tools: coupons, campaigns, announcements, and loyalty programs",
+    "AI-powered business profile optimization with budget control",
+    "Filament admin panels for tenants and super admins",
+    "REST API v1 with Sanctum auth, OTP, and social login",
+    "Real-time broadcasting with Laravel Reverb and Web Push",
+    "Modular monolith with DDD and Hexagonal/Ports-and-Adapters architecture",
+    "Exportable reports (PDF and Excel)",
+    "PWA support with offline capability"
+  ],
+  "publicApiSurface": [
+    "POST /api/v1/register",
+    "GET /api/v1/user",
+    "POST /api/v1/otp/generate",
+    "POST /api/v1/otp/verify",
+    "POST /api/v1/auth/social",
+    "GET /api/v1/products",
+    "GET /api/v1/products/{id}",
+    "POST /api/v1/orders",
+    "GET /api/v1/orders",
+    "POST /api/v1/coupons",
+    "POST /api/v1/checkout/validate-coupon",
+    "POST /api/v1/interactions",
+    "POST /api/v1/analytics/track",
+    "POST /api/v1/analytics/conversion",
+    "GET /api/v1/reports/*",
+    "GET /api/v1/exports/*",
+    "GET /api/v1/notifications/*",
+    "POST /api/v1/ai/generate",
+    "POST /api/v1/ai/optimize-profile",
+    "GET /api/v1/settings",
+    "POST /api/v1/push-subscriptions",
+    "POST /api/webhooks/payment"
+  ]
+}
